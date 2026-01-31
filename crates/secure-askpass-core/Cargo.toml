@@ -9,4 +9,12 @@ repository.workspace = true
 [dependencies]
 secrecy = { workspace = true }
 zeroize = { workspace = true }
+memsec = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
