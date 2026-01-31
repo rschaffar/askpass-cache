@@ -1,0 +1,15 @@
+[package]
+name = "askpass-cache-clear"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+secure-askpass-core = { path = "../secure-askpass-core" }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "askpass-cache-clear"
+path = "src/main.rs"

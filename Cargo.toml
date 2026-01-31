@@ -1,0 +1,58 @@
+[workspace]
+members = [
+    "crates/secure-askpass-daemon",
+    "crates/askpass-client",
+    "crates/askpass-cache-clear",
+    "crates/secure-askpass-core",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Robert Schaffar-Taurok <robert@projektbuero.at>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rschaffar/secure-askpass"
+homepage = "https://github.com/rschaffar/secure-askpass"
+
+[workspace.dependencies]
+# Secure memory
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = { version = "1.8", features = ["derive"] }
+memsec = "0.7"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# IPC
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# GUI (default: libadwaita)
+gtk4 = { version = "0.10", features = ["v4_18"] }
+libadwaita = { version = "0.8", features = ["v1_7"] }
+
+# Config
+toml = "0.8"
+dirs = "6"
+
+# Platform integration
+zbus = "5"
+sd-notify = "0.4"
+
+# Crypto (optional, for encrypted cache)
+aes-gcm = "0.10"
+rand = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

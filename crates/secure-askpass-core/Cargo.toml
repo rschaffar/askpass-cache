@@ -1,0 +1,12 @@
+[package]
+name = "secure-askpass-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+serde = { workspace = true }
