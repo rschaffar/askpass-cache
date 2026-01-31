@@ -17,7 +17,7 @@ use crate::protocol::ProtocolError;
 use crate::types::{PromptConfig, PromptResponse};
 
 /// Error type for prompt operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum PromptError {
     /// User cancelled the prompt.
     #[error("prompt cancelled by user")]

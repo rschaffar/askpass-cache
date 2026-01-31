@@ -39,6 +39,7 @@ dirs = "6"
 # Platform integration
 zbus = "5"
 sd-notify = "0.4"
+libc = "0.2"
 
 # Crypto (optional, for encrypted cache)
 aes-gcm = "0.10"

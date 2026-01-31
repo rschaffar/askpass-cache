@@ -13,6 +13,7 @@
 //! - [`protocol`]: IPC protocol types (`Request`, `Response`, `ErrorCode`)
 //! - [`traits`]: Pluggable component traits (`PasswordPrompt`, `SocketProvider`, `EventMonitor`)
 //! - [`cache`]: Secure credential cache with memory locking and TTL expiry
+//! - [`cache_id`]: Auto-detection of cache IDs from prompt text
 //!
 //! # Example
 //!
@@ -36,12 +37,14 @@
 //! ```
 
 pub mod cache;
+pub mod cache_id;
 pub mod protocol;
 pub mod traits;
 pub mod types;
 
 // Re-export commonly used types at the crate root for convenience
 pub use cache::{CachedCredential, CredentialCache};
+pub use cache_id::{detect_cache_id, Confidence, DetectionResult};
 pub use protocol::{ErrorCode, ProtocolError, Request, Response};
 pub use traits::{
     EventError, EventMonitor, NoOpEventMonitor, PasswordPrompt, PromptError, SocketError,
