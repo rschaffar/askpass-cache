@@ -194,10 +194,27 @@ The main daemon process, started via systemd socket activation.
 use secrecy::{Secret, ExposeSecret, Zeroize};
 use memsec::mlock;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheType {
+    Ssh,
+    Git,
+    Sudo,
+    Custom,
+}
+
 struct CachedCredential {
     secret: Secret<String>,      // Auto-zeros on drop
     created_at: Instant,
     ttl: Duration,
+    cache_type: CacheType,       // Determines config to use
+}
+
+// Per-type configuration
+struct CacheTypeConfig {
+    default_ttl: Duration,
+    max_ttl: Duration,
+    clear_on_lock: bool,
+    clear_on_suspend: bool,
 }
 
 // Lock the credential cache memory region
@@ -208,6 +225,7 @@ unsafe { mlock(cache_ptr, cache_size); }
 - Security audits without reviewing GTK code
 - Unit tests without display server
 - Future headless/CLI-only builds
+- Per-type configuration for different security/convenience trade-offs
 
 **Cache Key Strategy:**
 - For SSH FIDO2: Hash of `"ssh-fido:" + key_fingerprint`
@@ -474,10 +492,21 @@ Simple JSON over Unix socket (newline-delimited):
   "type": "get_credential",
   "prompt": "Enter PIN for ECDSA-SK key /home/user/.ssh/id_ecdsa_sk:",
   "cache_id": "auto",
+  "cache_type": "ssh",
+  "ttl": 1800,
   "allow_cache": true,
   "echo": false
 }
 ```
+
+**Field descriptions:**
+- `type`: Request type (always "get_credential")
+- `prompt`: Text to display to user
+- `cache_id`: Cache key ("auto" = auto-detect from prompt, or explicit key)
+- `cache_type`: Optional cache type override ("ssh", "git", "sudo", "custom")
+- `ttl`: Optional TTL override in seconds (must be ≤ max_ttl for cache type)
+- `allow_cache`: Whether to use/store cached credentials
+- `echo`: Whether to show typed characters (false for passwords)
 
 **Response (daemon -> client):**
 ```json
@@ -541,34 +570,68 @@ Native libadwaita dialog for GNOME integration:
 `~/.config/secure-askpass/config.toml`:
 
 ```toml
+# Global cache defaults
 [cache]
-# Default TTL for cached credentials (seconds)
-default_ttl = 3600
+default_ttl = 3600          # Default TTL: 1 hour
+max_ttl = 86400             # Maximum allowed TTL: 24 hours
+clear_on_lock = true        # Default: clear all caches on screen lock
+clear_on_suspend = true     # Default: clear all caches on suspend
 
-# Maximum TTL (even if user requests longer)
-max_ttl = 86400
+# SSH-specific configuration
+[cache.ssh]
+default_ttl = 1800          # 30 minutes (more security-critical)
+max_ttl = 7200              # Max 2 hours
+clear_on_lock = true        # Always clear SSH credentials on lock
+clear_on_suspend = true     # Always clear on suspend
 
-# Clear cache on screen lock
-clear_on_lock = true
+# Git-specific configuration
+[cache.git]
+default_ttl = 7200          # 2 hours (convenience for frequent commits/pushes)
+max_ttl = 28800             # Max 8 hours
+clear_on_lock = false       # Keep cached during quick lock/unlock
+clear_on_suspend = true     # But clear on suspend
 
-# Clear cache on suspend
-clear_on_suspend = true
+# Sudo-specific configuration
+[cache.sudo]
+default_ttl = 300           # 5 minutes (very sensitive)
+max_ttl = 900               # Max 15 minutes
+clear_on_lock = true        # Always clear sudo credentials
+clear_on_suspend = true     # Always clear on suspend
+
+# Custom cache entries inherit from [cache] defaults
+# unless user specifies a cache_type in the request
 
 [prompt]
 # Timeout for user response (seconds)
 timeout = 30
 
-# Default state of "remember" checkbox
+# Default state of "remember for session" checkbox
 default_remember = true
 
 [security]
-# Encrypt cached credentials with session key
+# Encrypt cached credentials with session key (AES-256-GCM)
 encrypt_cache = true
 
 # Require user confirmation even for cached credentials
 # (shows brief "Using cached credential" notification)
+# Note: Per design decision, default is silent (false)
 confirm_cached = false
 ```
+
+**Configuration Precedence:**
+
+1. Request-specific TTL (if provided by client)
+2. Cache-type-specific config (e.g., `[cache.ssh]`)
+3. Global defaults (`[cache]`)
+4. Hardcoded fallbacks (1 hour TTL, clear on lock/suspend)
+
+**Cache Type Detection:**
+
+Cache types are determined by `cache_id` prefix:
+- `ssh-fido:*` → `cache.ssh`
+- `git:*` → `cache.git`
+- `sudo:*` → `cache.sudo`
+- `custom:*` → `cache` (global defaults)
 
 ### systemd Integration
 
@@ -727,9 +790,11 @@ ui-cli = ["dep:rpassword"]  # CLI fallback
 #### Phase 3: Security Hardening
 - [ ] mlock for cache memory region
 - [ ] Optional AES-256-GCM encryption of cached credentials
+- [ ] Per-cache-type configuration (TTL, clear_on_lock, clear_on_suspend)
+- [ ] Configuration file parsing and validation
 - [ ] D-Bus event monitoring implementation (`EventMonitor` trait)
-- [ ] Clear-on-lock integration (listen for screensaver signals)
-- [ ] Clear-on-suspend integration
+- [ ] Clear-on-lock integration (default enabled, per-type configurable)
+- [ ] Clear-on-suspend integration (default enabled, per-type configurable)
 - [ ] systemd hardening options (MemoryDenyWriteExecute, etc.)
 - [ ] Security tests (memory leak detection, fuzzing protocol)
 - [ ] Third-party security audit of core modules
@@ -775,24 +840,81 @@ ui-cli = ["dep:rpassword"]  # CLI fallback
 - **git-credential-cache**: Simple daemon pattern
   - Reference for Unix socket + timeout architecture
 
-### Open Questions
+### Design Decisions
 
-1. **Should cached credentials require re-authentication after screen unlock?**
-   - GPG-agent can be configured this way
-   - Trade-off between security and convenience
+#### Cached Credentials After Screen Unlock
 
-2. **Multi-seat support?**
-   - Current design assumes single-user session
-   - Probably not needed for desktop use case
+**Decision:** Clear cache on screen lock by default, configurable per cache type
 
-3. **Integration with existing keyrings?**
-   - Could optionally store in GNOME Keyring for persistence across reboots
-   - But that defeats the "session-only" security model
+**Rationale:**
+- Security-first approach: reduces window of credential exposure
+- Matches GPG-agent's security model
+- Per-type configuration allows users to balance security vs convenience
+- FIDO2 hardware keys already provide physical security, so requiring re-entry after unlock is reasonable
 
-4. **FIDO2 touch-only prompts?**
-   - SSH sometimes asks for "touch only" (no PIN)
-   - Current detection: if prompt doesn't mention "PIN", return empty immediately
-   - Need to verify this heuristic is robust
+**Implementation:** D-Bus listener for `org.freedesktop.ScreenSaver` signals (Phase 3)
+
+**Configuration example:**
+```toml
+[cache.ssh]
+clear_on_lock = true   # Strict for SSH
+
+[cache.git]
+clear_on_lock = false  # Keep during quick lock/unlock
+```
+
+#### Cache Expiry Strategy
+
+**Decision:** TTL-based expiry with per-cache-type configuration
+
+**Behavior:**
+- Each cache entry has an independent TTL
+- Expired entries are automatically cleared
+- TTL is separate from event-based clearing (lock/suspend)
+- User can configure different TTLs: SSH (30min), Git (2hr), sudo (5min)
+
+**Implementation:** Background task checks expiry periodically; expired entries removed silently
+
+#### Multi-Seat Support
+
+**Decision:** Not required - single user session only
+
+**Rationale:**
+- Daemon runs as systemd user service (one per user)
+- `$XDG_RUNTIME_DIR/secure-askpass/socket` is already user-isolated
+- Multi-seat is automatically handled by systemd user sessions
+- Desktop use case doesn't require additional complexity
+
+#### Keyring Integration for Persistence
+
+**Decision:** Memory-only caching, no persistent storage
+
+**Rationale:**
+- Session-only credentials are the core security model
+- Persistent storage in GNOME Keyring defeats the purpose (any app can read via D-Bus)
+- If user wants persistence, they can use native tools (ssh-agent, git-credential-store)
+- Our value proposition is secure session caching, not persistent storage
+
+#### Cache Clearing Notifications
+
+**Decision:** Silent clearing (no user notifications)
+
+**Rationale:**
+- User notification on every cache clear would be noisy
+- Next authentication prompt is sufficient feedback
+- Silent operation matches GPG-agent behavior
+- No security benefit from notification (user already knows they locked screen)
+
+#### FIDO2 Touch-Only Prompts
+
+**Decision:** Deferred to future enhancement (post-MVP)
+
+**Rationale:**
+- Edge case detection is non-trivial (prompt text parsing is fragile)
+- Risk of breaking common workflows during MVP phase
+- Can be added in Phase 6 (Polish) once core functionality is stable
+- Current workaround: user can cancel dialog or enter empty string if no PIN needed
+- **Future consideration:** Detect "touch" keywords in prompt, show different dialog type
 
 ---
 
