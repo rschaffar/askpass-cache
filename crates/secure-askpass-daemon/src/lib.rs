@@ -9,5 +9,5 @@ pub mod socket;
 
 // Re-export main components
 pub use daemon::Daemon;
-pub use prompt::{Gtk4PasswordPrompt, MockPasswordPrompt};
+pub use prompt::{CliPasswordPrompt, Gtk4PasswordPrompt, MockPasswordPrompt};
 pub use socket::{default_provider, ManualSocketProvider, SystemdSocketProvider};

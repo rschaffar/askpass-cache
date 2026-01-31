@@ -99,7 +99,7 @@ in
       };
 
       Service = {
-        Type = "notify";
+        Type = "simple";
         ExecStart = "${cfg.package}/bin/secure-askpass-daemon";
         Restart = "on-failure";
         RestartSec = 5;
