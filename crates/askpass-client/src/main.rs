@@ -32,6 +32,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -168,13 +169,16 @@ fn clear_credential(cache_id: &str) -> Result<Response> {
 fn spawn_confirmation_dialog(cache_id: &str, prompt: &str) -> Result<()> {
     let exe = std::env::current_exe().context("Failed to get current executable path")?;
 
+    // Use process_group(0) to create a new process group, fully detaching
+    // the child process so the parent can exit immediately.
     Command::new(exe)
         .arg("--confirm")
         .arg(cache_id)
         .arg(prompt)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit()) // Allow errors to be seen
+        .stderr(Stdio::null())
+        .process_group(0) // Create new process group for full detachment
         .spawn()
         .context("Failed to spawn confirmation dialog")?;
 
