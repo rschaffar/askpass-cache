@@ -45,43 +45,52 @@ A minimal, focused Rust daemon that provides secure credential caching for any a
 │       │              │              │                            │
 │       └──────────────┼──────────────┘                           │
 │                      ▼                                           │
-│            ┌─────────────────┐                                   │
-│            │  askpass-client │  (thin binary, ~50 lines)        │
-│            │                 │                                   │
-│            │  - Connects to socket                              │
-│            │  - Sends prompt text                               │
-│            │  - Receives credential                             │
-│            │  - Prints to stdout                                │
-│            │  - Zeros memory before exit                        │
-│            └────────┬────────┘                                   │
-│                     │ Unix Socket                                │
-│                     ▼                                            │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │              secure-askpass-daemon                        │   │
-│  │                                                           │   │
-│  │  ┌─────────────────────────────────────────────────────┐ │   │
-│  │  │              Secure Memory Region                    │ │   │
-│  │  │              (mlock, no swap)                        │ │   │
-│  │  │                                                      │ │   │
-│  │  │  ┌────────────────────────────────────────────────┐ │ │   │
-│  │  │  │           Credential Cache                     │ │ │   │
-│  │  │  │                                                │ │ │   │
-│  │  │  │  cache_id -> SecretString (auto-zeroize)      │ │ │   │
-│  │  │  │  - TTL per entry                              │ │ │   │
-│  │  │  │  - Optional AES encryption                    │ │ │   │
-│  │  │  └────────────────────────────────────────────────┘ │ │   │
-│  │  └─────────────────────────────────────────────────────┘ │   │
-│  │                                                           │   │
-│  │  ┌─────────────────┐    ┌─────────────────────────────┐  │   │
-│  │  │  Socket Server  │    │  GTK4/libadwaita Prompter   │  │   │
-│  │  │                 │    │                             │  │   │
-│  │  │  - Accept conn  │    │  - Native Wayland/X11      │  │   │
-│  │  │  - Parse request│    │  - Password entry widget   │  │   │
-│  │  │  - Check cache  │    │  - "Remember" checkbox     │  │   │
-│  │  │  - Return cred  │    │  - Timeout auto-cancel     │  │   │
-│  │  └─────────────────┘    └─────────────────────────────┘  │   │
-│  │                                                           │   │
-│  └──────────────────────────────────────────────────────────┘   │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                    askpass-client                          │  │
+│  │  (inherits display environment from caller)                │  │
+│  │                                                            │  │
+│  │  1. Connect to daemon socket                               │  │
+│  │  2. Send GetCredential request                             │  │
+│  │  3. If CacheMiss:                                          │  │
+│  │     ┌────────────────────────────────────────────────────┐ │  │
+│  │     │         GTK4 Password Dialog                       │ │  │
+│  │     │  - Native Wayland/X11 (inherits from caller)       │ │  │
+│  │     │  - Password entry widget                           │ │  │
+│  │     │  - "Remember for this session" checkbox            │ │  │
+│  │     │  - Alt+R keyboard shortcut                         │ │  │
+│  │     └────────────────────────────────────────────────────┘ │  │
+│  │  4. Send StoreCredential (if remember checked)             │  │
+│  │  5. Print credential to stdout                             │  │
+│  │  6. Zero memory before exit                                │  │
+│  └──────────────────────┬────────────────────────────────────┘  │
+│                         │ Unix Socket                            │
+│                         ▼                                        │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              secure-askpass-daemon                         │  │
+│  │              (NO UI - cache only)                          │  │
+│  │                                                            │  │
+│  │  ┌──────────────────────────────────────────────────────┐ │  │
+│  │  │              Secure Memory Region                     │ │  │
+│  │  │              (mlock, no swap)                         │ │  │
+│  │  │                                                       │ │  │
+│  │  │  ┌─────────────────────────────────────────────────┐ │ │  │
+│  │  │  │           Credential Cache                      │ │ │  │
+│  │  │  │                                                 │ │ │  │
+│  │  │  │  cache_id -> SecretString (auto-zeroize)       │ │ │  │
+│  │  │  │  - TTL per entry                               │ │ │  │
+│  │  │  │  - Optional AES encryption                     │ │ │  │
+│  │  │  └─────────────────────────────────────────────────┘ │ │  │
+│  │  └──────────────────────────────────────────────────────┘ │  │
+│  │                                                            │  │
+│  │  ┌──────────────────────────────────────────────────────┐ │  │
+│  │  │  Socket Server                                       │ │  │
+│  │  │  - Accept connections                                │ │  │
+│  │  │  - Parse requests (GetCredential, StoreCredential)   │ │  │
+│  │  │  - Return Credential (cache hit) or CacheMiss        │ │  │
+│  │  │  - Handle ClearCache requests                        │ │  │
+│  │  └──────────────────────────────────────────────────────┘ │  │
+│  │                                                            │  │
+│  └───────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  systemd user service: secure-askpass.socket (socket activation) │
 └─────────────────────────────────────────────────────────────────┘
@@ -89,182 +98,160 @@ A minimal, focused Rust daemon that provides secure credential caching for any a
 
 ### Modular Architecture
 
-The daemon is designed with clear separation between secure core logic and UI presentation:
+The system is designed with clear separation: the daemon handles only secure caching, while the client handles all user interaction. This provides better security isolation and simpler testing.
 
 ```
-secure-askpass-daemon/
-├── Core (Security-Critical)
-│   ├── cache/          # Secure credential storage (mlock, zeroize)
-│   ├── protocol/       # Unix socket IPC handling
-│   └── auth/           # Authentication logic
-│
-├── UI Layer (Decoupled)
-│   ├── prompt/
-│   │   ├── trait.rs       # PasswordPrompt trait (abstraction)
-│   │   ├── libadwaita.rs  # libadwaita implementation (default)
-│   │   └── gtk4.rs        # Pure GTK4 implementation (future)
-│   └── ...
-│
-├── Platform Integration (Pluggable)
-│   ├── socket/
-│   │   ├── trait.rs       # SocketProvider trait
-│   │   ├── systemd.rs     # systemd socket activation
-│   │   └── manual.rs      # Manual socket binding (testing)
-│   └── events/
-│       ├── trait.rs       # EventMonitor trait
-│       ├── dbus.rs        # D-Bus event monitoring (lock screen, suspend)
-│       └── mock.rs        # Mock events for testing
-│
-└── Daemon Orchestration
-    └── main.rs         # Coordinates core + UI + platform
+secure-askpass-core/           # Shared library (NO UI dependencies)
+├── cache.rs                   # Secure credential storage (mlock, zeroize)
+├── cache_id.rs                # Auto-detection of cache IDs from prompts
+├── protocol.rs                # Request/Response types for IPC
+├── types.rs                   # CacheType enum with TTL defaults
+└── traits.rs                  # SocketProvider, EventMonitor traits
+
+secure-askpass-daemon/         # Cache daemon (NO UI dependencies)
+├── daemon.rs                  # Request handling, cache management
+├── socket/
+│   ├── mod.rs                 # Default provider selection
+│   ├── systemd.rs             # systemd socket activation
+│   └── manual.rs              # Manual socket binding (dev/testing)
+└── main.rs                    # Entry point, logging setup
+
+askpass-client/                # UI client (has GTK4 dependency)
+└── main.rs                    # GTK4 dialog, daemon communication
+
+askpass-cache-clear/           # CLI utility
+└── main.rs                    # Manual cache clearing
 ```
 
 **Key Principles:**
 
-1. **Secure Core is UI-Agnostic**
-   - Cache, protocol, and auth modules have ZERO UI dependencies
-   - Can be tested without GTK/display
-   - Security audit can focus on core modules (~500 LOC)
+1. **Daemon is UI-Free**
+   - Daemon has ZERO GTK/UI dependencies
+   - Can be tested without display server
+   - Smaller attack surface for security-critical code
+   - Security audit focuses on daemon + core (~1000 LOC)
 
-2. **UI Layer Behind Trait**
-   ```rust
-   pub trait PasswordPrompt: Send + Sync {
-       async fn prompt(&self, config: PromptConfig) -> Result<PromptResponse>;
-   }
-   ```
-   - Daemon depends on trait, not concrete implementation
-   - Easy to swap implementations (libadwaita → gtk4 → zenity fallback)
-   - Mockable for testing
+2. **Client Handles All User Interaction**
+   - Client inherits display environment from caller (SSH/Git/sudo)
+   - This ensures dialogs appear in the correct graphical context
+   - Client prompts user on cache miss, stores result in daemon
+   - GTK4 dialog with "Remember for this session" checkbox
 
 3. **Platform Integration Behind Traits**
    ```rust
    pub trait SocketProvider: Send + Sync {
-       async fn listen(&self) -> Result<UnixListener>;
+       fn listen(&self) -> Pin<Box<dyn Future<Output = Result<UnixListener, SocketError>> + Send + '_>>;
    }
    
    pub trait EventMonitor: Send + Sync {
-       async fn next_event(&mut self) -> Option<SystemEvent>;
+       fn next_event(&mut self) -> Pin<Box<dyn Future<Output = Option<SystemEvent>> + Send + '_>>;
    }
    ```
    - Socket activation can be systemd or manual
    - Event monitoring can be D-Bus, mock, or disabled
    - Enables testing without systemd
 
-4. **Compile-Time UI Selection**
-   ```toml
-   [features]
-   default = ["ui-libadwaita"]
-   ui-libadwaita = ["dep:libadwaita"]
-   ui-gtk4 = []           # Future: Pure GTK4
-   ui-cli = []            # Fallback for headless (rpassword)
-   ```
-
-5. **Clean Boundaries**
-   - Core never imports `gtk4` or `libadwaita`
-   - UI never imports `cache` internals
-   - Protocol types are in shared `types` module
-   - Each module is independently testable
+4. **Clean Boundaries**
+   - `secure-askpass-core` never imports `gtk4`
+   - `secure-askpass-daemon` never imports `gtk4`
+   - Only `askpass-client` has UI dependencies
+   - Protocol types are in shared core crate
 
 **Testability by Design:**
 
 All components are structured to enable comprehensive testing:
 
-- **Unit Tests**: Core modules (cache, protocol, auth) with zero external dependencies
-- **Integration Tests**: Mock UI + real core to test business logic
-- **Component Tests**: Individual modules with trait implementations mocked
-- **E2E Tests**: Full daemon with real GTK in Xvfb (CI environment)
+- **Unit Tests**: Core modules (cache, protocol, cache_id) with zero external dependencies
+- **Daemon Tests**: Full request/response handling without display server
+- **Client Tests**: GTK dialog tests require Xvfb (isolated from daemon tests)
+- **Property Tests**: Protocol parsing and cache_id detection with proptest
 - **Security Tests**: Memory leak detection, buffer overflow tests, fuzzing protocol
 
 ### Components
 
 #### 1. `secure-askpass-daemon`
 
-The main daemon process, started via systemd socket activation.
+The main daemon process, started via systemd socket activation. **The daemon has NO UI dependencies** - it only manages the credential cache.
 
 **Responsibilities:**
 - Listen on Unix socket (`$XDG_RUNTIME_DIR/secure-askpass/socket`)
 - Maintain credential cache in secure memory
-- Show password prompts when cache miss (via PasswordPrompt trait)
-- Handle TTL expiry and manual cache clearing
-- Monitor system events for cache clearing triggers
+- Handle `GetCredential` requests (return cached credential or `CacheMiss`)
+- Handle `StoreCredential` requests (store credential from client)
+- Handle `ClearCache` requests (manual or event-triggered clearing)
+- Handle TTL expiry (background cleanup task)
+- Monitor system events for cache clearing triggers (D-Bus)
 
 **Secure Memory Handling (Rust):**
 ```rust
-// In cache/ module - NO UI dependencies
-use secrecy::{Secret, ExposeSecret, Zeroize};
+use secrecy::{Secret, ExposeSecret};
 use memsec::mlock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CacheType {
-    Ssh,
-    Git,
-    Sudo,
-    Custom,
+pub enum CacheType {
+    Ssh,    // 30 min TTL, clear on lock
+    Git,    // 2 hour TTL, keep on lock
+    Sudo,   // 5 min TTL, clear on lock
+    Custom, // 1 hour TTL, clear on lock
 }
 
-struct CachedCredential {
-    secret: Secret<String>,      // Auto-zeros on drop
+pub struct CachedCredential {
+    secret: SecretString,        // Auto-zeros on drop
     created_at: Instant,
     ttl: Duration,
-    cache_type: CacheType,       // Determines config to use
-}
-
-// Per-type configuration
-struct CacheTypeConfig {
-    default_ttl: Duration,
-    max_ttl: Duration,
-    clear_on_lock: bool,
-    clear_on_suspend: bool,
+    cache_type: CacheType,
 }
 
 // Lock the credential cache memory region
 unsafe { mlock(cache_ptr, cache_size); }
 ```
 
-**Note:** The cache module is completely decoupled from UI code, allowing:
+**Note:** The daemon is completely decoupled from UI code, allowing:
 - Security audits without reviewing GTK code
 - Unit tests without display server
-- Future headless/CLI-only builds
+- Headless operation (client handles all UI)
 - Per-type configuration for different security/convenience trade-offs
 
-**Cache Key Strategy:**
-- For SSH FIDO2: Hash of `"ssh-fido:" + key_fingerprint`
-- For Git: `"git:" + protocol + "://" + host`
+**Cache Key Strategy (auto-detected from prompt text):**
+- For SSH FIDO2: `"ssh-fido:" + SHA256_fingerprint` or `"ssh-fido:" + key_path`
+- For Git: `"git:" + normalized_url`
 - For sudo: `"sudo:" + username`
-- Generic: `"custom:" + user-provided-id`
-
-**UI Implementation (Default: libadwaita):**
-```rust
-use gtk4::{PasswordEntry, PasswordEntryBuffer};
-use libadwaita::AlertDialog;
-
-// GTK4's PasswordEntryBuffer provides secure memory handling
-let buffer = PasswordEntryBuffer::new(None);
-let password_entry = PasswordEntry::builder()
-    .buffer(&buffer)
-    .show_peek_icon(true)
-    .build();
-
-// Wrap in libadwaita AlertDialog for modern GNOME look
-let dialog = AlertDialog::builder()
-    .heading("Authentication Required")
-    .body(&prompt_text)
-    .extra_child(&password_entry)
-    .build();
-```
+- Generic: `"custom:" + hash_of_prompt`
 
 #### 2. `askpass-client`
 
-Minimal binary that serves as SSH_ASKPASS, GIT_ASKPASS, SUDO_ASKPASS.
+Binary that serves as SSH_ASKPASS, GIT_ASKPASS, SUDO_ASKPASS. **Handles all user interaction** including the password dialog.
+
+**Key Design Decision:** The client inherits display environment (`DISPLAY`, `WAYLAND_DISPLAY`) from the calling process (SSH, Git, sudo), ensuring dialogs appear in the correct graphical context.
 
 **Behavior:**
-1. Connect to daemon socket
-2. Send request: `{"prompt": "Enter PIN for key ...", "cache_id": "auto"}`
-3. Receive response: `{"credential": "...", "from_cache": true}`
-4. Print credential to stdout
-5. Zero all memory, exit
+1. Get prompt text from command-line argument (passed by SSH/Git/sudo)
+2. Connect to daemon socket
+3. Send `GetCredential` request with prompt text and `cache_id: "auto"`
+4. If `Credential` response: Print to stdout, exit (cache hit)
+5. If `CacheMiss` response:
+   - Show GTK4 password dialog with "Remember for this session" checkbox
+   - If user enters password and "Remember" is checked: Send `StoreCredential` to daemon
+   - Print credential to stdout
+6. Zero all memory, exit
 
-**Auto cache_id detection:**
+**Fallback Mode:** If daemon is unavailable, client shows dialog and prints credential without caching.
+
+**GTK4 Password Dialog:**
+```rust
+use gtk4::{Application, ApplicationWindow, Entry, CheckButton, Button};
+
+// Dialog layout:
+// - Prompt label (from SSH/Git/sudo)
+// - Password entry (visibility: false)
+// - "Remember for this session" checkbox (Alt+R mnemonic, checked by default)
+// - Cancel / OK buttons
+
+let remember_check = CheckButton::with_mnemonic("_Remember for this session");
+remember_check.set_active(true);  // Checked by default
+```
+
+**Auto cache_id detection (in daemon):**
 - Parses prompt text to determine type (SSH key fingerprint, Git URL, etc.)
 - Falls back to hash of full prompt if unrecognized
 
@@ -286,7 +273,7 @@ askpass-cache-clear --type git
 
 ### Testing Strategy
 
-The modular architecture enables comprehensive testing at multiple levels:
+The architecture enables comprehensive testing with **daemon tests requiring NO display server**.
 
 #### Unit Tests (No External Dependencies)
 
@@ -300,11 +287,11 @@ mod tests {
     #[test]
     fn cache_stores_and_retrieves_credential() {
         let mut cache = CredentialCache::new();
-        let secret = Secret::new("test-password".to_string());
-        cache.insert("test-key", secret, Duration::from_secs(60));
+        cache.insert("test-key", SecretString::from("test-password"), 
+                     Duration::from_secs(60), CacheType::Custom);
         
         let retrieved = cache.get("test-key").unwrap();
-        assert_eq!(retrieved.expose_secret(), "test-password");
+        assert_eq!(retrieved.secret().expose_secret(), "test-password");
     }
     
     #[test]
@@ -315,89 +302,85 @@ mod tests {
     #[test]
     fn protocol_parses_valid_request() {
         let json = r#"{"type":"get_credential","prompt":"test"}"#;
-        let request = parse_request(json).unwrap();
-        assert_eq!(request.prompt, "test");
+        let request = Request::parse(json).unwrap();
+        // Verify request fields
     }
 }
 ```
 
-**Target:** >80% coverage of `cache/`, `protocol/`, `auth/` modules
+**Target:** >80% coverage of `secure-askpass-core` and `secure-askpass-daemon`
 
-#### Integration Tests (Mock Implementations)
+#### Daemon Tests (No Display Required)
 
-Test business logic with mocked dependencies:
+Test daemon request handling without GTK:
 
 ```rust
 #[tokio::test]
-async fn daemon_prompts_on_cache_miss() {
-    let mut mock_prompt = MockPasswordPrompt::new();
-    mock_prompt.expect_prompt()
-        .returning(|_| Ok(PromptResponse { 
-            credential: Secret::new("password".into()),
-            should_cache: true 
-        }));
+async fn daemon_returns_cache_miss_when_not_cached() {
+    let socket = ManualSocketProvider::new(&socket_path);
+    let daemon = Daemon::new(socket);
     
-    let daemon = Daemon::new(
-        mock_prompt,
-        MockSocketProvider::new(),
-        MockEventMonitor::new(),
-    );
+    let cache = Arc::clone(daemon.cache());
+    let request = Request::GetCredential {
+        prompt: "Enter password".to_string(),
+        cache_id: "test-key".to_string(),
+        cache_type: None,
+    };
     
-    let response = daemon.handle_request(/* ... */).await.unwrap();
-    assert_eq!(response.from_cache, false);
+    let response = daemon.handle_request(request, cache).await;
+    assert!(matches!(response, Response::CacheMiss { .. }));
 }
 
 #[tokio::test]
-async fn daemon_returns_from_cache_on_hit() {
-    // Pre-populate cache, verify no prompt is shown
+async fn daemon_returns_cached_credential() {
+    // Pre-populate cache, verify credential returned
 }
 
 #[tokio::test]
-async fn daemon_clears_cache_on_lock_event() {
-    // Trigger lock event, verify cache is cleared
+async fn daemon_stores_credential_from_client() {
+    // Test StoreCredential request handling
 }
 ```
 
-**Tools:** `mockall` crate for trait mocking
+**Key Benefit:** Daemon tests run fast without Xvfb because daemon has no UI.
 
-#### Component Tests (Real Module + Mock Dependencies)
+#### Client Tests (Require Xvfb)
 
-Test individual modules with real implementation:
-
-```rust
-#[test]
-fn socket_provider_systemd_parses_fd() {
-    std::env::set_var("LISTEN_FDS", "1");
-    let provider = SystemdSocketProvider::new();
-    // Test actual systemd socket activation parsing
-}
-
-#[test]
-fn event_monitor_dbus_receives_lock_signal() {
-    // Test real D-Bus integration (requires dbus-daemon in test env)
-}
-```
-
-#### End-to-End Tests (Full Stack in CI)
-
-Test complete daemon with real GTK in headless environment:
+GTK dialog tests require a display server:
 
 ```bash
-# In CI (GitHub Actions, etc.)
-export DISPLAY=:99
-Xvfb :99 -screen 0 1024x768x24 &
-
-# Run E2E tests
-cargo test --test e2e_tests --features ui-libadwaita
-
-# Test scenarios:
-# - Client connects, daemon shows prompt, returns credential
-# - Cached credential is returned without prompt
-# - Cache clears after TTL expires
-# - Daemon survives client disconnection
+# Run client tests with Xvfb
+xvfb-run cargo test -p askpass-client
 ```
 
-**Tools:** Xvfb for headless GTK testing
+#### Property-Based Tests
+
+Use `proptest` for cache_id detection and protocol robustness:
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn detect_cache_id_never_panics(prompt in ".*") {
+        let _ = detect_cache_id(&prompt);
+    }
+    
+    #[test]
+    fn cache_id_is_deterministic(prompt in ".*") {
+        let result1 = detect_cache_id(&prompt);
+        let result2 = detect_cache_id(&prompt);
+        prop_assert_eq!(result1.cache_id, result2.cache_id);
+    }
+    
+    #[test]
+    fn ssh_prompts_detected(key_type in "(ECDSA-SK|ED25519-SK)") {
+        let prompt = format!("Enter PIN for {} key SHA256:abc123:", key_type);
+        let result = detect_cache_id(&prompt);
+        prop_assert_eq!(result.cache_type, CacheType::Ssh);
+    }
+}
+```
 
 #### Security Tests
 
@@ -406,18 +389,20 @@ Verify security properties:
 ```rust
 #[test]
 fn credential_is_zeroized_on_drop() {
-    use std::ptr;
-    let secret = Secret::new("password".to_string());
-    let ptr = secret.expose_secret().as_ptr();
-    drop(secret);
-    
-    // Verify memory is zeroed (requires unsafe inspection)
-    // This is a conceptual test - actual implementation may vary
+    // SecretString auto-zeros via secrecy crate
 }
 
 #[test]
 fn cache_memory_is_mlocked() {
-    // Verify mlock was called on cache region
+    // Verify mlock was attempted on cache region
+}
+
+#[test]
+fn debug_output_redacts_secrets() {
+    let cred = CachedCredential::new(SecretString::from("secret"), ...);
+    let debug = format!("{:?}", cred);
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("secret"));
 }
 ```
 
@@ -427,97 +412,129 @@ fn cache_memory_is_mlocked() {
 - **Miri**: Test unsafe code with `cargo miri test`
 - **cargo-audit**: Automated vulnerability scanning in CI
 
-#### Property-Based Tests
-
-Use `proptest` for protocol robustness:
-
-```rust
-use proptest::prelude::*;
-
-proptest! {
-    #[test]
-    fn protocol_never_panics_on_invalid_json(s in "\\PC*") {
-        // Verify parser returns error instead of panicking
-        let _ = parse_request(&s);
-    }
-    
-    #[test]
-    fn cache_id_hash_is_deterministic(input in ".*") {
-        let hash1 = compute_cache_id(&input);
-        let hash2 = compute_cache_id(&input);
-        assert_eq!(hash1, hash2);
-    }
-}
-```
-
 #### Test Organization
 
 ```
-tests/
-├── unit/              # Module-level unit tests (in src/)
-├── integration/       # Integration tests with mocks
-│   ├── cache_tests.rs
-│   ├── daemon_tests.rs
-│   └── protocol_tests.rs
-├── component/         # Individual component tests
-│   ├── socket_tests.rs
-│   └── events_tests.rs
-├── e2e/               # Full stack tests
-│   └── daemon_e2e.rs
-├── security/          # Security-specific tests
-│   ├── memory_tests.rs
-│   └── fuzzing/
-└── common/            # Shared test utilities
-    └── mod.rs
+crates/
+├── secure-askpass-core/src/
+│   ├── cache.rs          # Unit tests inline (no deps)
+│   ├── cache_id.rs       # Unit + proptest tests inline
+│   ├── protocol.rs       # Unit tests inline
+│   └── traits.rs         # Unit tests inline
+├── secure-askpass-daemon/src/
+│   └── daemon.rs         # Integration tests inline (no display needed)
+└── askpass-client/src/
+    └── main.rs           # Unit tests inline (GTK tests need Xvfb)
 ```
 
 **CI Pipeline:**
 
 ```yaml
 # .github/workflows/test.yml
-- Unit tests: Fast, run on every commit
-- Integration tests: Run on every PR
-- E2E tests: Run on every PR (with Xvfb)
-- Security tests: Run nightly
-- Fuzzing: Continuous (separate workflow)
+- cargo test -p secure-askpass-core    # Fast, no deps
+- cargo test -p secure-askpass-daemon  # Fast, no display
+- xvfb-run cargo test -p askpass-client # Needs Xvfb
+- cargo clippy -- -D warnings
+- cargo fmt --check
+- cargo audit
 ```
 
 ### Protocol
 
-Simple JSON over Unix socket (newline-delimited):
+Simple JSON over Unix socket (newline-delimited).
 
-**Request (client -> daemon):**
+#### Request Types
+
+**GetCredential (client -> daemon):**
 ```json
 {
   "type": "get_credential",
   "prompt": "Enter PIN for ECDSA-SK key /home/user/.ssh/id_ecdsa_sk:",
   "cache_id": "auto",
-  "cache_type": "ssh",
-  "ttl": 1800,
-  "allow_cache": true,
-  "echo": false
+  "cache_type": "ssh"
 }
 ```
 
-**Field descriptions:**
-- `type`: Request type (always "get_credential")
-- `prompt`: Text to display to user
-- `cache_id`: Cache key ("auto" = auto-detect from prompt, or explicit key)
-- `cache_type`: Optional cache type override ("ssh", "git", "sudo", "custom")
-- `ttl`: Optional TTL override in seconds (must be ≤ max_ttl for cache type)
-- `allow_cache`: Whether to use/store cached credentials
-- `echo`: Whether to show typed characters (false for passwords)
+Fields:
+- `type`: Always `"get_credential"`
+- `prompt`: The prompt text (used for auto-detection if `cache_id` is `"auto"`)
+- `cache_id`: Cache key (`"auto"` = auto-detect from prompt, or explicit key)
+- `cache_type`: Optional type override (`"ssh"`, `"git"`, `"sudo"`, `"custom"`)
 
-**Response (daemon -> client):**
+**StoreCredential (client -> daemon):**
+```json
+{
+  "type": "store_credential",
+  "cache_id": "ssh-fido:SHA256:abc123",
+  "value": "123456",
+  "cache_type": "ssh",
+  "ttl": 1800
+}
+```
+
+Fields:
+- `type`: Always `"store_credential"`
+- `cache_id`: The cache key (from `CacheMiss` response)
+- `value`: The credential to store
+- `cache_type`: Optional type (from `CacheMiss` response)
+- `ttl`: Optional TTL override in seconds
+
+**ClearCache (client -> daemon):**
+```json
+{
+  "type": "clear_cache",
+  "cache_id": "all",
+  "cache_type": "ssh"
+}
+```
+
+Fields:
+- `cache_id`: `"all"` to clear all, or specific cache ID
+- `cache_type`: Optional, clear only entries of this type
+
+**Ping (health check):**
+```json
+{"type": "ping"}
+```
+
+#### Response Types
+
+**Credential (cache hit):**
 ```json
 {
   "type": "credential",
-  "value": "123456",
-  "from_cache": false
+  "value": "123456"
 }
 ```
 
-**Error response:**
+**CacheMiss (client should prompt user):**
+```json
+{
+  "type": "cache_miss",
+  "cache_id": "ssh-fido:SHA256:abc123",
+  "cache_type": "ssh"
+}
+```
+
+The client should:
+1. Show password dialog to user
+2. If user enters password and wants to remember: Send `StoreCredential` with the returned `cache_id` and `cache_type`
+3. Print credential to stdout
+
+**Stored (confirmation):**
+```json
+{"type": "stored"}
+```
+
+**CacheCleared:**
+```json
+{
+  "type": "cache_cleared",
+  "count": 3
+}
+```
+
+**Error:**
 ```json
 {
   "type": "error",
@@ -526,12 +543,11 @@ Simple JSON over Unix socket (newline-delimited):
 }
 ```
 
-**Cache clear request:**
+Error codes: `cancelled`, `invalid_request`, `internal_error`, `shutting_down`
+
+**Pong:**
 ```json
-{
-  "type": "clear_cache",
-  "cache_id": "all"
-}
+{"type": "pong"}
 ```
 
 ### GTK4 Prompt Dialog
@@ -768,61 +784,51 @@ ui-cli = ["dep:rpassword"]  # CLI fallback
 
 ### Implementation Phases
 
-#### Phase 1: Core Daemon (MVP)
-- [ ] Define core traits (`PasswordPrompt`, `SocketProvider`, `EventMonitor`)
-- [ ] Implement secure cache module (mlock, `Secret<String>`, TTL)
-- [ ] Implement protocol module (JSON over Unix socket)
-- [ ] Basic daemon orchestration with trait-based dependencies
-- [ ] Simple zenity-based prompt implementation (temporary, for testing)
-- [ ] `askpass-client` binary with secure memory handling
-- [ ] Unit tests for cache and protocol modules
-- [ ] Works as SSH_ASKPASS
+#### Phase 1: Core Infrastructure (COMPLETE)
+- [x] Define core traits (`SocketProvider`, `EventMonitor`)
+- [x] Implement secure cache module (mlock, `SecretString`, TTL)
+- [x] Implement protocol module (JSON over Unix socket)
+- [x] Implement cache_id auto-detection from prompt text
+- [x] Basic daemon with request handling (GetCredential, StoreCredential, ClearCache)
+- [x] `askpass-client` binary with GTK4 dialog
+- [x] "Remember for this session" checkbox (Alt+R mnemonic)
+- [x] Unit tests for cache, protocol, and cache_id modules
+- [x] Property-based tests (proptest) for cache_id detection
+- [x] Works as SSH_ASKPASS, GIT_ASKPASS, SUDO_ASKPASS
 
-#### Phase 2: Proper GUI
-- [ ] GTK4/libadwaita password dialog implementing `PasswordPrompt` trait
-- [ ] "Remember for session" checkbox
-- [ ] Proper keyboard handling (grab on X11, layer-shell on Wayland)
-- [ ] Timeout with visual countdown
-- [ ] Password visibility toggle
-- [ ] Component tests for UI module (with mock core)
-- [ ] E2E tests with Xvfb in CI
+#### Phase 2: NixOS Integration (COMPLETE)
+- [x] Nix package derivation
+- [x] Home-manager module with configuration options
+- [x] Systemd user service with security hardening
+- [x] Environment variable setup (SSH_ASKPASS, GIT_ASKPASS, SUDO_ASKPASS)
+- [x] Development shell (`nix develop`)
 
-#### Phase 3: Security Hardening
-- [ ] mlock for cache memory region
-- [ ] Optional AES-256-GCM encryption of cached credentials
-- [ ] Per-cache-type configuration (TTL, clear_on_lock, clear_on_suspend)
-- [ ] Configuration file parsing and validation
+#### Phase 3: Configuration & Polish (IN PROGRESS)
+- [ ] Configuration file parsing in daemon
+- [ ] CLI arguments for daemon (`--config`, `--socket`, `--verbose`)
+- [ ] `askpass-cache-clear` utility (currently placeholder)
+- [ ] Timeout with visual countdown in dialog
+- [ ] Password visibility toggle in dialog
+
+#### Phase 4: D-Bus Event Monitoring
 - [ ] D-Bus event monitoring implementation (`EventMonitor` trait)
-- [ ] Clear-on-lock integration (default enabled, per-type configurable)
-- [ ] Clear-on-suspend integration (default enabled, per-type configurable)
-- [ ] systemd hardening options (MemoryDenyWriteExecute, etc.)
+- [ ] Clear-on-lock integration (listen to `org.freedesktop.ScreenSaver`)
+- [ ] Clear-on-suspend integration (listen to `org.freedesktop.login1`)
+- [ ] Per-cache-type clearing policies
+
+#### Phase 5: Security Hardening
+- [ ] Optional AES-256-GCM encryption of cached credentials
 - [ ] Security tests (memory leak detection, fuzzing protocol)
-- [ ] Third-party security audit of core modules
-
-#### Phase 4: Testing & CI
-- [ ] Comprehensive unit test suite (>80% coverage of core)
-- [ ] Integration tests with mock implementations
-- [ ] Property-based tests for protocol parsing (proptest)
 - [ ] Memory safety tests (valgrind, miri)
-- [ ] CI pipeline (GitHub Actions or similar)
+- [ ] CI pipeline (GitHub Actions)
 - [ ] Automated security scanning (cargo-audit, cargo-deny)
-- [ ] Performance benchmarks for cache operations
 
-#### Phase 5: NixOS Integration
-- [ ] Nix package derivation
-- [ ] Home-manager module with configuration options
-- [ ] Integration with existing `modules/security.nix`
-- [ ] NixOS VM tests for E2E validation
-- [ ] Documentation for NixOS users
-
-#### Phase 6: Polish & Extensibility
-- [ ] Configuration file support with validation
-- [ ] `askpass-cache-clear` utility
-- [ ] Pure GTK4 UI implementation (feature flag: `ui-gtk4`)
+#### Phase 6: Future Enhancements
+- [ ] libadwaita UI upgrade (currently using plain GTK4)
 - [ ] CLI-only fallback (feature flag: `ui-cli`, using rpassword)
-- [ ] Comprehensive user documentation
-- [ ] API documentation for trait implementations
-- [ ] Consider extracting UI prompt to separate crate (`libadwaita-secure-prompt`)
+- [ ] Keyboard grab on X11 for prompt security
+- [ ] Wayland layer-shell hints for security
+- [ ] Third-party security audit of core modules
 
 ### Prior Art & References
 
