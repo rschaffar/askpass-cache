@@ -1,24 +1,21 @@
 //! Core types and utilities for secure-askpass.
 //!
 //! This crate provides the fundamental building blocks for the secure-askpass
-//! credential caching system. It is intentionally UI-agnostic to allow:
-//!
-//! - Security audits to focus on core modules
-//! - Unit tests without a display server
-//! - Different UI backends (GTK4, libadwaita, CLI)
+//! credential caching system. It is intentionally UI-agnostic - the daemon
+//! only handles caching, while the client handles user prompts.
 //!
 //! # Modules
 //!
-//! - [`types`]: Core data types (`CacheType`, `PromptConfig`, `PromptResponse`)
+//! - [`types`]: Core data types (`CacheType`)
 //! - [`protocol`]: IPC protocol types (`Request`, `Response`, `ErrorCode`)
-//! - [`traits`]: Pluggable component traits (`PasswordPrompt`, `SocketProvider`, `EventMonitor`)
+//! - [`traits`]: Pluggable component traits (`SocketProvider`, `EventMonitor`)
 //! - [`cache`]: Secure credential cache with memory locking and TTL expiry
 //! - [`cache_id`]: Auto-detection of cache IDs from prompt text
 //!
 //! # Example
 //!
 //! ```
-//! use secure_askpass_core::types::{CacheType, PromptConfig};
+//! use secure_askpass_core::types::CacheType;
 //! use secure_askpass_core::protocol::{Request, Response};
 //!
 //! // Create a credential request
@@ -26,9 +23,6 @@
 //!     prompt: "Enter PIN for key".to_string(),
 //!     cache_id: "auto".to_string(),
 //!     cache_type: Some(CacheType::Ssh),
-//!     ttl: None,
-//!     allow_cache: true,
-//!     echo: false,
 //! };
 //!
 //! // Serialize to JSON for IPC
@@ -47,7 +41,6 @@ pub use cache::{CachedCredential, CredentialCache};
 pub use cache_id::{detect_cache_id, Confidence, DetectionResult};
 pub use protocol::{ErrorCode, ProtocolError, Request, Response};
 pub use traits::{
-    EventError, EventMonitor, NoOpEventMonitor, PasswordPrompt, PromptError, SocketError,
-    SocketProvider, SystemEvent,
+    EventError, EventMonitor, NoOpEventMonitor, SocketError, SocketProvider, SystemEvent,
 };
-pub use types::{CacheType, PromptConfig, PromptResponse};
+pub use types::CacheType;

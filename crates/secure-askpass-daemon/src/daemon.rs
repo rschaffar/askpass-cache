@@ -3,15 +3,18 @@
 //! This module provides the core `Daemon` struct that coordinates:
 //! - Socket listening for client connections
 //! - Credential cache management
-//! - Password prompt display
 //! - Request/response handling
+//!
+//! Note: The daemon does NOT handle prompting - that's the client's job.
+//! The daemon only manages the credential cache.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use secrecy::SecretString;
 use secure_askpass_core::{
     cache_id::detect_cache_id, CacheType, CredentialCache, ErrorCode, EventMonitor,
-    NoOpEventMonitor, PasswordPrompt, PromptConfig, PromptError, Request, Response, SocketProvider,
+    NoOpEventMonitor, Request, Response, SocketProvider,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -21,12 +24,11 @@ use tracing::{debug, error, info, warn};
 /// The main daemon struct.
 ///
 /// This struct coordinates all the daemon's components and handles
-/// the main event loop.
-pub struct Daemon<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> {
+/// the main event loop. The daemon only manages caching - it does not
+/// display any UI prompts.
+pub struct Daemon<S: SocketProvider, E: EventMonitor> {
     /// The credential cache.
     cache: Arc<Mutex<CredentialCache>>,
-    /// The password prompt implementation.
-    prompt: P,
     /// The socket provider.
     socket_provider: S,
     /// The event monitor (used in Phase 3 for D-Bus event monitoring).
@@ -34,24 +36,22 @@ pub struct Daemon<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> {
     event_monitor: Mutex<E>,
 }
 
-impl<P: PasswordPrompt, S: SocketProvider> Daemon<P, S, NoOpEventMonitor> {
+impl<S: SocketProvider> Daemon<S, NoOpEventMonitor> {
     /// Create a new daemon without event monitoring.
-    pub fn new(prompt: P, socket_provider: S) -> Self {
+    pub fn new(socket_provider: S) -> Self {
         Self {
             cache: Arc::new(Mutex::new(CredentialCache::new())),
-            prompt,
             socket_provider,
             event_monitor: Mutex::new(NoOpEventMonitor),
         }
     }
 }
 
-impl<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> Daemon<P, S, E> {
+impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
     /// Create a new daemon with event monitoring.
-    pub fn with_event_monitor(prompt: P, socket_provider: S, event_monitor: E) -> Self {
+    pub fn with_event_monitor(socket_provider: S, event_monitor: E) -> Self {
         Self {
             cache: Arc::new(Mutex::new(CredentialCache::new())),
-            prompt,
             socket_provider,
             event_monitor: Mutex::new(event_monitor),
         }
@@ -88,8 +88,6 @@ impl<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> Daemon<P, S, E> {
                 Ok((stream, _addr)) => {
                     debug!("Accepted connection");
                     let cache = Arc::clone(&self.cache);
-                    // We can't easily share &self.prompt across tasks, so we handle inline
-                    // In a real implementation, we'd use an Arc<dyn PasswordPrompt>
                     self.handle_connection(stream, cache).await;
                 }
                 Err(e) => {
@@ -149,11 +147,17 @@ impl<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> Daemon<P, S, E> {
                 prompt,
                 cache_id,
                 cache_type,
-                ttl,
-                allow_cache,
-                echo: _,
             } => {
-                self.handle_get_credential(prompt, cache_id, cache_type, ttl, allow_cache, cache)
+                self.handle_get_credential(prompt, cache_id, cache_type, cache)
+                    .await
+            }
+            Request::StoreCredential {
+                cache_id,
+                value,
+                cache_type,
+                ttl,
+            } => {
+                self.handle_store_credential(cache_id, value, cache_type, ttl, cache)
                     .await
             }
             Request::ClearCache {
@@ -165,13 +169,14 @@ impl<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> Daemon<P, S, E> {
     }
 
     /// Handle a GetCredential request.
+    ///
+    /// Returns the cached credential if available, or CacheMiss if not.
+    /// The client is responsible for prompting the user and calling StoreCredential.
     async fn handle_get_credential(
         &self,
         prompt_text: String,
         cache_id: String,
         cache_type: Option<CacheType>,
-        ttl: Option<u64>,
-        allow_cache: bool,
         cache: Arc<Mutex<CredentialCache>>,
     ) -> Response {
         // Determine cache ID
@@ -189,65 +194,48 @@ impl<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> Daemon<P, S, E> {
         debug!(
             cache_id = %effective_cache_id,
             cache_type = %effective_type,
-            allow_cache = allow_cache,
             "Processing credential request"
         );
 
-        // Check cache if allowed
-        if allow_cache {
-            let cache_guard = cache.lock().await;
-            if let Some(cached) = cache_guard.get(&effective_cache_id) {
-                debug!(cache_id = %effective_cache_id, "Returning cached credential");
-                return Response::credential(cached.secret().clone(), true);
-            }
-            drop(cache_guard);
+        // Check cache
+        let cache_guard = cache.lock().await;
+        if let Some(cached) = cache_guard.get(&effective_cache_id) {
+            debug!(cache_id = %effective_cache_id, "Returning cached credential");
+            return Response::credential(cached.secret().clone());
         }
+        drop(cache_guard);
 
-        // Show prompt
-        let config = PromptConfig {
-            prompt_text,
-            cache_id: effective_cache_id.clone(),
-            cache_type: effective_type,
-            timeout: Duration::from_secs(30),
-            show_remember_checkbox: allow_cache,
-            echo: false,
-        };
+        // Cache miss - client should prompt user and call StoreCredential
+        debug!(cache_id = %effective_cache_id, "Cache miss");
+        Response::cache_miss(effective_cache_id, effective_type)
+    }
 
-        let prompt_result = self.prompt.prompt(config).await;
+    /// Handle a StoreCredential request.
+    ///
+    /// Stores a credential in the cache after the client has prompted the user.
+    async fn handle_store_credential(
+        &self,
+        cache_id: String,
+        value: SecretString,
+        cache_type: Option<CacheType>,
+        ttl: Option<u64>,
+        cache: Arc<Mutex<CredentialCache>>,
+    ) -> Response {
+        let effective_type = cache_type.unwrap_or_else(|| CacheType::from_cache_id(&cache_id));
+        let effective_ttl = ttl
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| effective_type.default_ttl());
 
-        match prompt_result {
-            Ok(response) => {
-                // Cache if requested
-                if allow_cache && response.should_cache {
-                    let ttl = ttl
-                        .map(Duration::from_secs)
-                        .unwrap_or_else(|| effective_type.default_ttl());
+        let mut cache_guard = cache.lock().await;
+        cache_guard.insert(&cache_id, value, effective_ttl, effective_type);
 
-                    let mut cache_guard = cache.lock().await;
-                    cache_guard.insert(
-                        &effective_cache_id,
-                        response.credential.clone(),
-                        ttl,
-                        effective_type,
-                    );
-                    debug!(
-                        cache_id = %effective_cache_id,
-                        ttl_secs = ttl.as_secs(),
-                        "Cached credential"
-                    );
-                }
+        debug!(
+            cache_id = %cache_id,
+            ttl_secs = effective_ttl.as_secs(),
+            "Stored credential"
+        );
 
-                Response::credential(response.credential, false)
-            }
-            Err(PromptError::Cancelled) => {
-                Response::error(ErrorCode::Cancelled, "User cancelled the prompt")
-            }
-            Err(PromptError::Timeout(secs)) => Response::error(
-                ErrorCode::Timeout,
-                format!("Prompt timed out after {}s", secs),
-            ),
-            Err(e) => Response::error(ErrorCode::InternalError, e.to_string()),
-        }
+        Response::stored()
     }
 
     /// Handle a ClearCache request.
@@ -299,9 +287,8 @@ impl<P: PasswordPrompt, S: SocketProvider, E: EventMonitor> Daemon<P, S, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompt::MockPasswordPrompt;
     use crate::socket::ManualSocketProvider;
-    use secrecy::{ExposeSecret, SecretString};
+    use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -309,9 +296,8 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let prompt = MockPasswordPrompt::with_password("test");
         let socket = ManualSocketProvider::new(&socket_path);
-        let _daemon = Daemon::new(prompt, socket);
+        let _daemon = Daemon::new(socket);
     }
 
     #[tokio::test]
@@ -319,9 +305,8 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let prompt = MockPasswordPrompt::with_password("test");
         let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
+        let daemon = Daemon::new(socket);
 
         let cache = Arc::clone(daemon.cache());
         let response = daemon.handle_request(Request::Ping, cache).await;
@@ -330,13 +315,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_get_credential_from_cache() {
+    async fn handle_get_credential_returns_cached() {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let prompt = MockPasswordPrompt::with_password("prompted");
         let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
+        let daemon = Daemon::new(socket);
 
         // Pre-populate cache
         {
@@ -354,79 +338,70 @@ mod tests {
             prompt: "Enter password".to_string(),
             cache_id: "test-key".to_string(),
             cache_type: None,
-            ttl: None,
-            allow_cache: true,
-            echo: false,
         };
 
         let response = daemon.handle_request(request, cache).await;
 
         match response {
-            Response::Credential { value, from_cache } => {
+            Response::Credential { value } => {
                 assert_eq!(value.expose_secret(), "cached-password");
-                assert!(from_cache);
             }
             _ => panic!("Expected credential response"),
         }
     }
 
     #[tokio::test]
-    async fn handle_get_credential_prompts_on_miss() {
+    async fn handle_get_credential_returns_cache_miss() {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let prompt = MockPasswordPrompt::with_password("from-prompt");
         let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
+        let daemon = Daemon::new(socket);
 
         let cache = Arc::clone(daemon.cache());
         let request = Request::GetCredential {
             prompt: "Enter password".to_string(),
+            cache_id: "nonexistent-key".to_string(),
+            cache_type: None,
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+
+        match response {
+            Response::CacheMiss {
+                cache_id,
+                cache_type,
+            } => {
+                assert_eq!(cache_id, "nonexistent-key");
+                assert_eq!(cache_type, CacheType::Custom);
+            }
+            _ => panic!("Expected cache miss response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_store_credential() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::new(socket);
+
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::StoreCredential {
             cache_id: "new-key".to_string(),
-            cache_type: None,
-            ttl: None,
-            allow_cache: true,
-            echo: false,
+            value: SecretString::from("new-password"),
+            cache_type: Some(CacheType::Ssh),
+            ttl: Some(1800),
         };
 
         let response = daemon.handle_request(request, cache).await;
+        assert!(matches!(response, Response::Stored));
 
-        match response {
-            Response::Credential { value, from_cache } => {
-                assert_eq!(value.expose_secret(), "from-prompt");
-                assert!(!from_cache);
-            }
-            _ => panic!("Expected credential response"),
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_cancelled_prompt() {
-        let temp_dir = tempdir().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-
-        let prompt = MockPasswordPrompt::cancelled();
-        let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
-
-        let cache = Arc::clone(daemon.cache());
-        let request = Request::GetCredential {
-            prompt: "Enter password".to_string(),
-            cache_id: "key".to_string(),
-            cache_type: None,
-            ttl: None,
-            allow_cache: true,
-            echo: false,
-        };
-
-        let response = daemon.handle_request(request, cache).await;
-
-        match response {
-            Response::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::Cancelled);
-            }
-            _ => panic!("Expected error response"),
-        }
+        // Verify it was stored
+        let cache = daemon.cache().lock().await;
+        let cached = cache.get("new-key").expect("should be cached");
+        assert_eq!(cached.secret().expose_secret(), "new-password");
     }
 
     #[tokio::test]
@@ -434,9 +409,8 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let prompt = MockPasswordPrompt::with_password("test");
         let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
+        let daemon = Daemon::new(socket);
 
         // Add some entries
         {
@@ -480,9 +454,8 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let prompt = MockPasswordPrompt::with_password("test");
         let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
+        let daemon = Daemon::new(socket);
 
         // Add entries of different types
         {
@@ -529,55 +502,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_is_cached_when_should_cache_true() {
+    async fn auto_detect_cache_id() {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let prompt = MockPasswordPrompt::with_password("new-pass").with_cache(true);
         let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
+        let daemon = Daemon::new(socket);
 
         let cache = Arc::clone(daemon.cache());
         let request = Request::GetCredential {
-            prompt: "Enter password".to_string(),
-            cache_id: "cache-me".to_string(),
+            prompt: "Enter PIN for ECDSA-SK key /home/user/.ssh/id_ecdsa_sk:".to_string(),
+            cache_id: "auto".to_string(),
             cache_type: None,
-            ttl: None,
-            allow_cache: true,
-            echo: false,
         };
 
-        let _ = daemon.handle_request(request, cache).await;
+        let response = daemon.handle_request(request, cache).await;
 
-        // Verify credential was cached
-        let cache = daemon.cache().lock().await;
-        let cached = cache.get("cache-me").expect("should be cached");
-        assert_eq!(cached.secret().expose_secret(), "new-pass");
-    }
-
-    #[tokio::test]
-    async fn credential_not_cached_when_should_cache_false() {
-        let temp_dir = tempdir().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-
-        let prompt = MockPasswordPrompt::with_password("no-cache").with_cache(false);
-        let socket = ManualSocketProvider::new(&socket_path);
-        let daemon = Daemon::new(prompt, socket);
-
-        let cache = Arc::clone(daemon.cache());
-        let request = Request::GetCredential {
-            prompt: "Enter password".to_string(),
-            cache_id: "dont-cache-me".to_string(),
-            cache_type: None,
-            ttl: None,
-            allow_cache: true,
-            echo: false,
-        };
-
-        let _ = daemon.handle_request(request, cache).await;
-
-        // Verify credential was NOT cached
-        let cache = daemon.cache().lock().await;
-        assert!(cache.get("dont-cache-me").is_none());
+        match response {
+            Response::CacheMiss {
+                cache_id,
+                cache_type,
+            } => {
+                // Should detect as SSH type
+                assert_eq!(cache_type, CacheType::Ssh);
+                assert!(cache_id.starts_with("ssh-fido:"));
+            }
+            _ => panic!("Expected cache miss response"),
+        }
     }
 }

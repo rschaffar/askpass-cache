@@ -122,12 +122,9 @@ in
         Restart = "on-failure";
         RestartSec = 5;
 
-        # Pass through display environment for GTK
-        PassEnvironment = [
-          "DISPLAY"
-          "WAYLAND_DISPLAY"
-          "XDG_SESSION_TYPE"
-        ];
+        # Note: The daemon doesn't need display environment variables.
+        # The askpass-client handles all UI prompts and inherits display
+        # environment from the calling process (SSH, Git, sudo).
 
         # Security hardening
         MemoryDenyWriteExecute = true;

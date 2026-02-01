@@ -1,12 +1,10 @@
 //! Trait definitions for pluggable components.
 //!
 //! These traits define the interfaces for:
-//! - Password prompting (UI layer)
 //! - Socket provisioning (systemd vs manual)
 //! - Event monitoring (screen lock, suspend, etc.)
 //!
-//! By using traits, the daemon can be tested with mock implementations
-//! and different UI backends can be swapped at compile time.
+//! By using traits, the daemon can be tested with mock implementations.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -14,27 +12,6 @@ use std::pin::Pin;
 use tokio::net::UnixListener;
 
 use crate::protocol::ProtocolError;
-use crate::types::{PromptConfig, PromptResponse};
-
-/// Error type for prompt operations.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum PromptError {
-    /// User cancelled the prompt.
-    #[error("prompt cancelled by user")]
-    Cancelled,
-
-    /// Prompt timed out.
-    #[error("prompt timed out after {0} seconds")]
-    Timeout(u64),
-
-    /// Failed to initialize the UI toolkit.
-    #[error("UI initialization failed: {0}")]
-    InitializationFailed(String),
-
-    /// Generic UI error.
-    #[error("UI error: {0}")]
-    UiError(String),
-}
 
 /// Error type for socket provider operations.
 #[derive(Debug, thiserror::Error)]
@@ -97,48 +74,6 @@ impl std::fmt::Display for SystemEvent {
             SystemEvent::SessionEnding => write!(f, "session_ending"),
         }
     }
-}
-
-/// Trait for password prompt implementations.
-///
-/// This trait abstracts the UI layer, allowing different implementations:
-/// - GTK4/libadwaita for GNOME
-/// - Pure GTK4 for other desktops
-/// - CLI (rpassword) for headless systems
-/// - Mock for testing
-///
-/// # Example (Mock Implementation)
-///
-/// ```ignore
-/// struct MockPrompt {
-///     response: Option<PromptResponse>,
-/// }
-///
-/// impl PasswordPrompt for MockPrompt {
-///     async fn prompt(&self, config: PromptConfig) -> Result<PromptResponse, PromptError> {
-///         self.response.clone().ok_or(PromptError::Cancelled)
-///     }
-/// }
-/// ```
-pub trait PasswordPrompt: Send + Sync {
-    /// Show a password prompt to the user.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Configuration for the prompt (text, timeout, etc.)
-    ///
-    /// # Returns
-    ///
-    /// The user's response, including the credential and whether to cache it.
-    ///
-    /// # Errors
-    ///
-    /// Returns `PromptError::Cancelled` if the user cancels.
-    /// Returns `PromptError::Timeout` if the prompt times out.
-    fn prompt(
-        &self,
-        config: PromptConfig,
-    ) -> Pin<Box<dyn Future<Output = Result<PromptResponse, PromptError>> + Send + '_>>;
 }
 
 /// Trait for socket provider implementations.
@@ -262,18 +197,6 @@ mod tests {
     }
 
     #[test]
-    fn prompt_error_display() {
-        assert_eq!(
-            PromptError::Cancelled.to_string(),
-            "prompt cancelled by user"
-        );
-        assert_eq!(
-            PromptError::Timeout(30).to_string(),
-            "prompt timed out after 30 seconds"
-        );
-    }
-
-    #[test]
     fn request_parse_and_serialize() {
         use crate::protocol::Request;
 
@@ -294,15 +217,14 @@ mod tests {
         use crate::protocol::Response;
         use secrecy::{ExposeSecret, SecretString};
 
-        let response = Response::credential(SecretString::from("pass"), false);
+        let response = Response::credential(SecretString::from("pass"));
         let line = response.to_json_line().unwrap();
         assert!(line.ends_with('\n'));
 
         let parsed = Response::parse(line.trim()).unwrap();
         match parsed {
-            Response::Credential { value, from_cache } => {
+            Response::Credential { value } => {
                 assert_eq!(value.expose_secret(), "pass");
-                assert!(!from_cache);
             }
             _ => panic!("Wrong response type"),
         }

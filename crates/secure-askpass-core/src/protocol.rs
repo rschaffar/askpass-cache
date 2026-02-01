@@ -13,9 +13,10 @@ use crate::types::CacheType;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    /// Request a credential (show prompt or return from cache).
+    /// Request a credential from the cache.
+    /// Returns `CacheMiss` if not cached (client should prompt user and use `StoreCredential`).
     GetCredential {
-        /// The prompt text to display to the user.
+        /// The prompt text (used for cache ID auto-detection).
         prompt: String,
 
         /// The cache ID for this credential.
@@ -26,18 +27,27 @@ pub enum Request {
         /// The type of credential (optional, auto-detected if not provided).
         #[serde(default)]
         cache_type: Option<CacheType>,
+    },
+
+    /// Store a credential in the cache (after client prompts user).
+    StoreCredential {
+        /// The cache ID for this credential.
+        cache_id: String,
+
+        /// The credential value to store.
+        #[serde(
+            serialize_with = "serialize_secret",
+            deserialize_with = "deserialize_secret"
+        )]
+        value: SecretString,
+
+        /// The type of credential (for TTL defaults).
+        #[serde(default)]
+        cache_type: Option<CacheType>,
 
         /// TTL override in seconds (optional, uses cache type default if not provided).
         #[serde(default)]
         ttl: Option<u64>,
-
-        /// Whether to use/store cached credentials (default: true).
-        #[serde(default = "default_true")]
-        allow_cache: bool,
-
-        /// Whether to echo input (default: false for passwords).
-        #[serde(default)]
-        echo: bool,
     },
 
     /// Clear cached credentials.
@@ -59,15 +69,11 @@ fn default_cache_id() -> String {
     "auto".to_string()
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// A response from the daemon to the client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    /// A credential response.
+    /// A credential response (cache hit).
     Credential {
         /// The credential value.
         /// Note: This is serialized as a plain string in JSON for IPC.
@@ -76,10 +82,20 @@ pub enum Response {
             deserialize_with = "deserialize_secret"
         )]
         value: SecretString,
-
-        /// Whether this credential came from the cache.
-        from_cache: bool,
     },
+
+    /// Cache miss - credential not found.
+    /// Client should prompt the user and use `StoreCredential` to cache the result.
+    CacheMiss {
+        /// The resolved cache ID (after auto-detection).
+        cache_id: String,
+
+        /// The detected cache type.
+        cache_type: CacheType,
+    },
+
+    /// Confirmation that a credential was stored.
+    Stored,
 
     /// An error response.
     Error {
@@ -107,9 +123,6 @@ pub enum ErrorCode {
     /// User cancelled the prompt.
     Cancelled,
 
-    /// Prompt timed out.
-    Timeout,
-
     /// Invalid request format.
     InvalidRequest,
 
@@ -124,7 +137,6 @@ impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ErrorCode::Cancelled => write!(f, "cancelled"),
-            ErrorCode::Timeout => write!(f, "timeout"),
             ErrorCode::InvalidRequest => write!(f, "invalid_request"),
             ErrorCode::InternalError => write!(f, "internal_error"),
             ErrorCode::ShuttingDown => write!(f, "shutting_down"),
@@ -170,9 +182,22 @@ where
 }
 
 impl Response {
-    /// Create a credential response.
-    pub fn credential(value: SecretString, from_cache: bool) -> Self {
-        Response::Credential { value, from_cache }
+    /// Create a credential response (cache hit).
+    pub fn credential(value: SecretString) -> Self {
+        Response::Credential { value }
+    }
+
+    /// Create a cache miss response.
+    pub fn cache_miss(cache_id: impl Into<String>, cache_type: CacheType) -> Self {
+        Response::CacheMiss {
+            cache_id: cache_id.into(),
+            cache_type,
+        }
+    }
+
+    /// Create a stored confirmation response.
+    pub fn stored() -> Self {
+        Response::Stored
     }
 
     /// Create an error response.
@@ -200,9 +225,6 @@ mod tests {
             prompt: "Enter PIN for key".to_string(),
             cache_id: "ssh-fido:SHA256:abc".to_string(),
             cache_type: Some(CacheType::Ssh),
-            ttl: Some(3600),
-            allow_cache: true,
-            echo: false,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -213,16 +235,10 @@ mod tests {
                 prompt,
                 cache_id,
                 cache_type,
-                ttl,
-                allow_cache,
-                echo,
             } => {
                 assert_eq!(prompt, "Enter PIN for key");
                 assert_eq!(cache_id, "ssh-fido:SHA256:abc");
                 assert_eq!(cache_type, Some(CacheType::Ssh));
-                assert_eq!(ttl, Some(3600));
-                assert!(allow_cache);
-                assert!(!echo);
             }
             _ => panic!("Wrong request type"),
         }
@@ -239,16 +255,38 @@ mod tests {
                 prompt,
                 cache_id,
                 cache_type,
-                ttl,
-                allow_cache,
-                echo,
             } => {
                 assert_eq!(prompt, "Enter password");
                 assert_eq!(cache_id, "auto");
                 assert_eq!(cache_type, None);
-                assert_eq!(ttl, None);
-                assert!(allow_cache); // default true
-                assert!(!echo); // default false
+            }
+            _ => panic!("Wrong request type"),
+        }
+    }
+
+    #[test]
+    fn request_store_credential_serde_roundtrip() {
+        let request = Request::StoreCredential {
+            cache_id: "ssh-fido:SHA256:abc".to_string(),
+            value: SecretString::from("secret123"),
+            cache_type: Some(CacheType::Ssh),
+            ttl: Some(1800),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Request::StoreCredential {
+                cache_id,
+                value,
+                cache_type,
+                ttl,
+            } => {
+                assert_eq!(cache_id, "ssh-fido:SHA256:abc");
+                assert_eq!(value.expose_secret(), "secret123");
+                assert_eq!(cache_type, Some(CacheType::Ssh));
+                assert_eq!(ttl, Some(1800));
             }
             _ => panic!("Wrong request type"),
         }
@@ -288,18 +326,47 @@ mod tests {
 
     #[test]
     fn response_credential_serde_roundtrip() {
-        let response = Response::credential(SecretString::from("secret123"), true);
+        let response = Response::credential(SecretString::from("secret123"));
 
         let json = serde_json::to_string(&response).unwrap();
         let parsed: Response = serde_json::from_str(&json).unwrap();
 
         match parsed {
-            Response::Credential { value, from_cache } => {
+            Response::Credential { value } => {
                 assert_eq!(value.expose_secret(), "secret123");
-                assert!(from_cache);
             }
             _ => panic!("Wrong response type"),
         }
+    }
+
+    #[test]
+    fn response_cache_miss_serde_roundtrip() {
+        let response = Response::cache_miss("ssh-fido:SHA256:abc", CacheType::Ssh);
+
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Response::CacheMiss {
+                cache_id,
+                cache_type,
+            } => {
+                assert_eq!(cache_id, "ssh-fido:SHA256:abc");
+                assert_eq!(cache_type, CacheType::Ssh);
+            }
+            _ => panic!("Wrong response type"),
+        }
+    }
+
+    #[test]
+    fn response_stored_serde_roundtrip() {
+        let response = Response::stored();
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"type":"stored"}"#);
+
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, Response::Stored));
     }
 
     #[test]
@@ -346,7 +413,6 @@ mod tests {
     #[test]
     fn error_code_display() {
         assert_eq!(ErrorCode::Cancelled.to_string(), "cancelled");
-        assert_eq!(ErrorCode::Timeout.to_string(), "timeout");
         assert_eq!(ErrorCode::InvalidRequest.to_string(), "invalid_request");
         assert_eq!(ErrorCode::InternalError.to_string(), "internal_error");
         assert_eq!(ErrorCode::ShuttingDown.to_string(), "shutting_down");
@@ -356,7 +422,6 @@ mod tests {
     fn error_code_serde_roundtrip() {
         let codes = [
             ErrorCode::Cancelled,
-            ErrorCode::Timeout,
             ErrorCode::InvalidRequest,
             ErrorCode::InternalError,
             ErrorCode::ShuttingDown,

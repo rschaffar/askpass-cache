@@ -1,12 +1,10 @@
 //! Core types for secure-askpass.
 //!
 //! This module contains the fundamental data structures used throughout
-//! the secure-askpass system, including cache types, prompt configuration,
-//! and prompt responses.
+//! the secure-askpass system, primarily cache type definitions.
 
 use std::time::Duration;
 
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 /// The type of credential being cached.
@@ -95,66 +93,6 @@ impl std::fmt::Display for CacheType {
     }
 }
 
-/// Configuration for a password prompt dialog.
-///
-/// This is passed to the `PasswordPrompt` trait implementation to configure
-/// how the dialog should be displayed.
-#[derive(Debug, Clone)]
-pub struct PromptConfig {
-    /// The text to display to the user (e.g., "Enter PIN for key...")
-    pub prompt_text: String,
-
-    /// The cache ID for this credential
-    pub cache_id: String,
-
-    /// The type of credential being requested
-    pub cache_type: CacheType,
-
-    /// Timeout after which the prompt should auto-cancel
-    pub timeout: Duration,
-
-    /// Whether to show the "Remember for session" checkbox
-    pub show_remember_checkbox: bool,
-
-    /// Whether to echo input (false for passwords, true for usernames)
-    pub echo: bool,
-}
-
-impl Default for PromptConfig {
-    fn default() -> Self {
-        Self {
-            prompt_text: String::new(),
-            cache_id: String::new(),
-            cache_type: CacheType::Custom,
-            timeout: Duration::from_secs(30),
-            show_remember_checkbox: true,
-            echo: false,
-        }
-    }
-}
-
-/// Response from a password prompt.
-///
-/// Contains the credential entered by the user and whether they want it cached.
-#[derive(Clone)]
-pub struct PromptResponse {
-    /// The credential entered by the user
-    pub credential: SecretString,
-
-    /// Whether the user checked "Remember for session"
-    pub should_cache: bool,
-}
-
-// Manual Debug implementation to avoid exposing the secret
-impl std::fmt::Debug for PromptResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PromptResponse")
-            .field("credential", &"[REDACTED]")
-            .field("should_cache", &self.should_cache)
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,27 +163,5 @@ mod tests {
         assert!(CacheType::Git.clear_on_suspend());
         assert!(CacheType::Sudo.clear_on_suspend());
         assert!(CacheType::Custom.clear_on_suspend());
-    }
-
-    #[test]
-    fn prompt_config_default() {
-        let config = PromptConfig::default();
-        assert!(config.prompt_text.is_empty());
-        assert!(config.cache_id.is_empty());
-        assert_eq!(config.cache_type, CacheType::Custom);
-        assert_eq!(config.timeout, Duration::from_secs(30));
-        assert!(config.show_remember_checkbox);
-        assert!(!config.echo);
-    }
-
-    #[test]
-    fn prompt_response_debug_redacts_credential() {
-        let response = PromptResponse {
-            credential: SecretString::from("super-secret-password"),
-            should_cache: true,
-        };
-        let debug_output = format!("{:?}", response);
-        assert!(debug_output.contains("[REDACTED]"));
-        assert!(!debug_output.contains("super-secret-password"));
     }
 }
