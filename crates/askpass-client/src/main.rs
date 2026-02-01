@@ -38,7 +38,8 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, Entry, Label, Orientation,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, Entry, Label,
+    Orientation,
 };
 use secrecy::{ExposeSecret, SecretString};
 use secure_askpass_core::{CacheType, Request, Response};
@@ -137,7 +138,12 @@ fn store_credential(
 /// Result from the GTK password dialog.
 enum DialogResult {
     /// User entered a password.
-    Password(SecretString),
+    Password {
+        /// The entered password.
+        value: SecretString,
+        /// Whether to remember (cache) the password.
+        remember: bool,
+    },
     /// User cancelled the dialog.
     Cancelled,
 }
@@ -163,7 +169,7 @@ fn show_gtk_dialog(prompt_text: &str) -> Result<DialogResult> {
             .application(app)
             .title("Authentication Required")
             .default_width(400)
-            .default_height(150)
+            .default_height(180)
             .resizable(false)
             .modal(true)
             .build();
@@ -188,6 +194,11 @@ fn show_gtk_dialog(prompt_text: &str) -> Result<DialogResult> {
         entry.set_placeholder_text(Some("Password"));
         vbox.append(&entry);
 
+        // Add "Remember for this session" checkbox with Alt+R mnemonic
+        let remember_check = CheckButton::with_mnemonic("_Remember for this session");
+        remember_check.set_active(true); // Checked by default
+        vbox.append(&remember_check);
+
         // Create button box
         let button_box = GtkBox::new(Orientation::Horizontal, 8);
         button_box.set_halign(Align::End);
@@ -205,13 +216,15 @@ fn show_gtk_dialog(prompt_text: &str) -> Result<DialogResult> {
         let ok_button = Button::with_label("OK");
         ok_button.add_css_class("suggested-action");
         let entry_clone = entry.clone();
+        let remember_clone = remember_check.clone();
         let window_clone = window.clone();
         ok_button.connect_clicked(move |_| {
             let password = entry_clone.text().to_string();
             if !password.is_empty() {
+                let remember = remember_clone.is_active();
                 // Store the result in thread-local storage
                 PASSWORD_RESULT.with(|r| {
-                    *r.borrow_mut() = Some(password);
+                    *r.borrow_mut() = Some((password, remember));
                 });
             }
             window_clone.close();
@@ -240,17 +253,20 @@ fn show_gtk_dialog(prompt_text: &str) -> Result<DialogResult> {
     app.run_with_args::<&str>(&[]);
 
     // Get the result from thread-local storage
-    let password = PASSWORD_RESULT.with(|r| r.borrow_mut().take());
-    match password {
-        Some(p) => Ok(DialogResult::Password(SecretString::from(p))),
+    let result = PASSWORD_RESULT.with(|r| r.borrow_mut().take());
+    match result {
+        Some((password, remember)) => Ok(DialogResult::Password {
+            value: SecretString::from(password),
+            remember,
+        }),
         None => Ok(DialogResult::Cancelled),
     }
 }
 
-// Thread-local to pass password out of GTK event loop
+// Thread-local to pass password and remember flag out of GTK event loop
 // This is safe because GTK runs single-threaded on the main thread
 thread_local! {
-    static PASSWORD_RESULT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static PASSWORD_RESULT: std::cell::RefCell<Option<(String, bool)>> = const { std::cell::RefCell::new(None) };
 }
 
 fn main() -> ExitCode {
@@ -283,16 +299,18 @@ fn main() -> ExitCode {
         } => {
             // Cache miss - show dialog, store result, and print
             match show_gtk_dialog(&prompt) {
-                Ok(DialogResult::Password(password)) => {
+                Ok(DialogResult::Password { value, remember }) => {
                     // Print the password first (so caller gets it quickly)
-                    print!("{}", password.expose_secret());
+                    print!("{}", value.expose_secret());
                     if std::io::stdout().flush().is_err() {
                         return ExitCode::FAILURE;
                     }
 
-                    // Store in cache (best effort - don't fail if this fails)
-                    if let Err(e) = store_credential(&cache_id, password, cache_type) {
-                        eprintln!("Warning: Failed to cache credential: {}", e);
+                    // Store in cache only if user wants to remember
+                    if remember {
+                        if let Err(e) = store_credential(&cache_id, value, cache_type) {
+                            eprintln!("Warning: Failed to cache credential: {}", e);
+                        }
                     }
 
                     ExitCode::SUCCESS
@@ -322,8 +340,9 @@ fn main() -> ExitCode {
 /// Used as fallback when daemon is not available.
 fn show_dialog_and_print(prompt: &str) -> ExitCode {
     match show_gtk_dialog(prompt) {
-        Ok(DialogResult::Password(password)) => {
-            print!("{}", password.expose_secret());
+        Ok(DialogResult::Password { value, .. }) => {
+            // Note: remember flag is ignored here since daemon is unavailable
+            print!("{}", value.expose_secret());
             if std::io::stdout().flush().is_err() {
                 return ExitCode::FAILURE;
             }
