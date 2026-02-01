@@ -1,6 +1,6 @@
-//! Secure askpass daemon implementation.
+//! Askpass cache daemon implementation.
 //!
-//! This crate provides the main daemon process for secure-askpass,
+//! This crate provides the main daemon process for askpass-cache,
 //! including socket handling and cache management.
 //!
 //! Note: The daemon only manages the credential cache. Password prompting

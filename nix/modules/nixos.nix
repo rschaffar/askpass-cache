@@ -8,17 +8,17 @@
 with lib;
 
 let
-  cfg = config.services.secure-askpass;
+  cfg = config.services.askpass-cache;
 in
 {
-  options.services.secure-askpass = {
-    enable = mkEnableOption "secure-askpass credential caching daemon (system-wide package installation)";
+  options.services.askpass-cache = {
+    enable = mkEnableOption "askpass-cache credential caching daemon (system-wide package installation)";
 
     package = mkOption {
       type = types.package;
-      default = pkgs.secure-askpass;
-      defaultText = literalExpression "pkgs.secure-askpass";
-      description = "The secure-askpass package to use.";
+      default = pkgs.askpass-cache;
+      defaultText = literalExpression "pkgs.askpass-cache";
+      description = "The askpass-cache package to use.";
     };
   };
 
@@ -29,14 +29,14 @@ in
     # Note: Actual daemon runs per-user via home-manager
     warnings = [
       ''
-        services.secure-askpass is enabled at the NixOS level, which only
+        services.askpass-cache is enabled at the NixOS level, which only
         installs the package system-wide. The daemon should run as a user
         service for security. Use the home-manager module instead:
 
         In your home-manager configuration:
-          services.secure-askpass.enable = true;
+          services.askpass-cache.enable = true;
 
-        See: https://github.com/rschaffar/secure-askpass/blob/main/README.md
+        See: https://github.com/rschaffar/askpass-cache/blob/main/README.md
       ''
     ];
   };

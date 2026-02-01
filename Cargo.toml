@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "crates/secure-askpass-daemon",
+    "crates/askpass-cached",
     "crates/askpass-client",
     "crates/askpass-cache-ctl",
-    "crates/secure-askpass-core",
+    "crates/askpass-cache-core",
 ]
 resolver = "2"
 
@@ -12,8 +12,8 @@ version = "0.1.0"
 authors = ["Robert Schaffar-Taurok <robert@projektbuero.at>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rschaffar/secure-askpass"
-homepage = "https://github.com/rschaffar/secure-askpass"
+repository = "https://github.com/rschaffar/askpass-cache"
+homepage = "https://github.com/rschaffar/askpass-cache"
 
 [workspace.dependencies]
 # Secure memory

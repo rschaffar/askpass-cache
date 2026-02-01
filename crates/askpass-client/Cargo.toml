@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-secure-askpass-core = { path = "../secure-askpass-core" }
+askpass-cache-core = { path = "../askpass-cache-core" }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
 secrecy = { workspace = true }

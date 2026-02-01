@@ -15,7 +15,7 @@ use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::Path;
 use std::pin::Pin;
 
-use secure_askpass_core::{SocketError, SocketProvider};
+use askpass_cache_core::{SocketError, SocketProvider};
 use tokio::net::UnixListener;
 use tracing::{debug, warn};
 

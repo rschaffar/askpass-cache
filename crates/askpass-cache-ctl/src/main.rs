@@ -1,4 +1,4 @@
-//! askpass-cache-ctl - Control utility for the secure-askpass credential cache.
+//! askpass-cache-ctl - Control utility for the askpass-cache credential cache.
 //!
 //! This utility allows you to:
 //! - List cached credentials (metadata only, no secrets)
@@ -30,13 +30,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
+use askpass_cache_core::{short_id, CacheType, Request, Response};
 use clap::{Parser, Subcommand};
-use secure_askpass_core::{short_id, CacheType, Request, Response};
 
-/// Control utility for the secure-askpass credential cache.
+/// Control utility for the askpass-cache credential cache.
 #[derive(Parser)]
 #[command(name = "askpass-cache-ctl")]
-#[command(about = "Control the secure-askpass credential cache")]
+#[command(about = "Control the askpass-cache credential cache")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -72,11 +72,11 @@ enum Commands {
 /// Get the socket path.
 fn get_socket_path() -> PathBuf {
     if let Some(runtime_dir) = dirs::runtime_dir() {
-        runtime_dir.join("secure-askpass").join("socket")
+        runtime_dir.join("askpass-cache").join("socket")
     } else {
         // Fallback for systems without XDG_RUNTIME_DIR
         let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/secure-askpass-{}/socket", uid))
+        PathBuf::from(format!("/tmp/askpass-cache-{}/socket", uid))
     }
 }
 
@@ -349,6 +349,6 @@ mod tests {
     fn socket_path_uses_runtime_dir() {
         let path = get_socket_path();
         assert!(path.ends_with("socket"));
-        assert!(path.parent().unwrap().ends_with("secure-askpass"));
+        assert!(path.parent().unwrap().ends_with("askpass-cache"));
     }
 }

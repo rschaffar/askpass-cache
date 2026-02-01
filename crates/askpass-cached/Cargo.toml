@@ -1,5 +1,5 @@
 [package]
-name = "secure-askpass-daemon"
+name = "askpass-cached"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-secure-askpass-core = { path = "../secure-askpass-core" }
+askpass-cache-core = { path = "../askpass-cache-core" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -22,9 +22,9 @@ secrecy = { workspace = true }
 tempfile = "3"
 
 [lib]
-name = "secure_askpass_daemon"
+name = "askpass_cached"
 path = "src/lib.rs"
 
 [[bin]]
-name = "secure-askpass-daemon"
+name = "askpass-cached"
 path = "src/main.rs"

@@ -103,8 +103,8 @@ impl std::fmt::Debug for CachedCredential {
 /// # Example
 ///
 /// ```
-/// use secure_askpass_core::cache::CredentialCache;
-/// use secure_askpass_core::types::CacheType;
+/// use askpass_cache_core::cache::CredentialCache;
+/// use askpass_cache_core::types::CacheType;
 /// use secrecy::SecretString;
 /// use std::time::Duration;
 ///

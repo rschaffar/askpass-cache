@@ -1,4 +1,4 @@
-# secure-askpass
+# askpass-cache
 
 A secure, generic credential caching daemon for Linux with proper memory protection.
 
@@ -26,7 +26,7 @@ GPG-agent's credential handling (from `gnupg/agent/cache.c`):
 5. **TTL-based expiry** - Automatic cache clearing after timeout
 6. **Event-based clearing** - Cache cleared on card removal, lock screen, etc.
 
-## Solution: secure-askpass
+## Solution: askpass-cache
 
 A minimal, focused Rust daemon that provides secure credential caching for any askpass use case.
 
@@ -66,7 +66,7 @@ A minimal, focused Rust daemon that provides secure credential caching for any a
 │                         │ Unix Socket                            │
 │                         ▼                                        │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │              secure-askpass-daemon                         │  │
+│  │              askpass-cached                         │  │
 │  │              (NO UI - cache only)                          │  │
 │  │                                                            │  │
 │  │  ┌──────────────────────────────────────────────────────┐ │  │
@@ -92,7 +92,7 @@ A minimal, focused Rust daemon that provides secure credential caching for any a
 │  │                                                            │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                  │
-│  systemd user service: secure-askpass.socket (socket activation) │
+│  systemd user service: askpass-cache.socket (socket activation) │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -101,14 +101,14 @@ A minimal, focused Rust daemon that provides secure credential caching for any a
 The system is designed with clear separation: the daemon handles only secure caching, while the client handles all user interaction. This provides better security isolation and simpler testing.
 
 ```
-secure-askpass-core/           # Shared library (NO UI dependencies)
+askpass-cache-core/           # Shared library (NO UI dependencies)
 ├── cache.rs                   # Secure credential storage (mlock, zeroize)
 ├── cache_id.rs                # Auto-detection of cache IDs from prompts
 ├── protocol.rs                # Request/Response types for IPC
 ├── types.rs                   # CacheType enum with TTL defaults
 └── traits.rs                  # SocketProvider, EventMonitor traits
 
-secure-askpass-daemon/         # Cache daemon (NO UI dependencies)
+askpass-cached/         # Cache daemon (NO UI dependencies)
 ├── daemon.rs                  # Request handling, cache management
 ├── socket/
 │   ├── mod.rs                 # Default provider selection
@@ -152,8 +152,8 @@ askpass-cache-ctl/             # CLI utility
    - Enables testing without systemd
 
 4. **Clean Boundaries**
-   - `secure-askpass-core` never imports `gtk4`
-   - `secure-askpass-daemon` never imports `gtk4`
+   - `askpass-cache-core` never imports `gtk4`
+   - `askpass-cached` never imports `gtk4`
    - Only `askpass-client` has UI dependencies
    - Protocol types are in shared core crate
 
@@ -169,12 +169,12 @@ All components are structured to enable comprehensive testing:
 
 ### Components
 
-#### 1. `secure-askpass-daemon`
+#### 1. `askpass-cached`
 
 The main daemon process, started via systemd socket activation. **The daemon has NO UI dependencies** - it only manages the credential cache.
 
 **Responsibilities:**
-- Listen on Unix socket (`$XDG_RUNTIME_DIR/secure-askpass/socket`)
+- Listen on Unix socket (`$XDG_RUNTIME_DIR/askpass-cache/socket`)
 - Maintain credential cache in secure memory
 - Handle `GetCredential` requests (return cached credential or `CacheMiss`)
 - Handle `StoreCredential` requests (store credential from client)
@@ -319,7 +319,7 @@ mod tests {
 }
 ```
 
-**Target:** >80% coverage of `secure-askpass-core` and `secure-askpass-daemon`
+**Target:** >80% coverage of `askpass-cache-core` and `askpass-cached`
 
 #### Daemon Tests (No Display Required)
 
@@ -427,12 +427,12 @@ fn debug_output_redacts_secrets() {
 
 ```
 crates/
-├── secure-askpass-core/src/
+├── askpass-cache-core/src/
 │   ├── cache.rs          # Unit tests inline (no deps)
 │   ├── cache_id.rs       # Unit + proptest tests inline
 │   ├── protocol.rs       # Unit tests inline
 │   └── traits.rs         # Unit tests inline
-├── secure-askpass-daemon/src/
+├── askpass-cached/src/
 │   └── daemon.rs         # Integration tests inline (no display needed)
 └── askpass-client/src/
     └── main.rs           # Unit tests inline (GTK tests need Xvfb)
@@ -442,8 +442,8 @@ crates/
 
 ```yaml
 # .github/workflows/test.yml
-- cargo test -p secure-askpass-core    # Fast, no deps
-- cargo test -p secure-askpass-daemon  # Fast, no display
+- cargo test -p askpass-cache-core    # Fast, no deps
+- cargo test -p askpass-cached  # Fast, no display
 - xvfb-run cargo test -p askpass-client # Needs Xvfb
 - cargo clippy -- -D warnings
 - cargo fmt --check
@@ -594,7 +594,7 @@ Native libadwaita dialog for GNOME integration:
 
 ### Configuration
 
-`~/.config/secure-askpass/config.toml`:
+`~/.config/askpass-cache/config.toml`:
 
 ```toml
 # Global cache defaults
@@ -662,28 +662,28 @@ Cache types are determined by `cache_id` prefix:
 
 ### systemd Integration
 
-**`secure-askpass.socket`:**
+**`askpass-cache.socket`:**
 ```ini
 [Unit]
 Description=Secure Askpass Daemon Socket
 
 [Socket]
-ListenStream=%t/secure-askpass/socket
+ListenStream=%t/askpass-cache/socket
 SocketMode=0600
 
 [Install]
 WantedBy=sockets.target
 ```
 
-**`secure-askpass.service`:**
+**`askpass-cache.service`:**
 ```ini
 [Unit]
 Description=Secure Askpass Daemon
-Requires=secure-askpass.socket
+Requires=askpass-cache.socket
 
 [Service]
 Type=notify
-ExecStart=/usr/bin/secure-askpass-daemon
+ExecStart=/usr/bin/askpass-cached
 MemoryDenyWriteExecute=true
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -697,7 +697,7 @@ PrivateTmp=true
 # In home-manager module
 { config, pkgs, ... }:
 {
-  services.secure-askpass = {
+  services.askpass-cache = {
     enable = true;
     settings = {
       cache.default_ttl = 3600;
@@ -707,10 +707,10 @@ PrivateTmp=true
 
   # Automatically set environment variables
   home.sessionVariables = {
-    SSH_ASKPASS = "${pkgs.secure-askpass}/bin/askpass-client";
+    SSH_ASKPASS = "${pkgs.askpass-cache}/bin/askpass-client";
     SSH_ASKPASS_REQUIRE = "prefer";
-    GIT_ASKPASS = "${pkgs.secure-askpass}/bin/askpass-client";
-    SUDO_ASKPASS = "${pkgs.secure-askpass}/bin/askpass-client";
+    GIT_ASKPASS = "${pkgs.askpass-cache}/bin/askpass-client";
+    SUDO_ASKPASS = "${pkgs.askpass-cache}/bin/askpass-client";
   };
 }
 ```
@@ -898,7 +898,7 @@ clear_on_lock = false  # Keep during quick lock/unlock
 
 **Rationale:**
 - Daemon runs as systemd user service (one per user)
-- `$XDG_RUNTIME_DIR/secure-askpass/socket` is already user-isolated
+- `$XDG_RUNTIME_DIR/askpass-cache/socket` is already user-isolated
 - Multi-seat is automatically handled by systemd user sessions
 - Desktop use case doesn't require additional complexity
 
@@ -939,11 +939,11 @@ clear_on_lock = false  # Keep during quick lock/unlock
 
 ```bash
 # Clone and build
-cd ~/projects/priv/secure-askpass
+cd ~/projects/priv/askpass-cache
 cargo build --release
 
 # Run daemon (for development)
-cargo run --bin secure-askpass-daemon
+cargo run --bin askpass-cached
 
 # Test with SSH
 SSH_ASKPASS=./target/release/askpass-client \

@@ -11,11 +11,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use secrecy::SecretString;
-use secure_askpass_core::{
+use askpass_cache_core::{
     cache_id::detect_cache_id, CacheEntryInfo, CacheType, CredentialCache, ErrorCode, EventMonitor,
     NoOpEventMonitor, Request, Response, SocketProvider,
 };
+use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;

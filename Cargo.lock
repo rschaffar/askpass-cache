@@ -68,14 +68,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
+name = "askpass-cache-core"
+version = "0.1.0"
+dependencies = [
+ "memsec",
+ "proptest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "askpass-cache-ctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "askpass-cache-core",
  "clap",
  "dirs",
  "libc",
- "secure-askpass-core",
+]
+
+[[package]]
+name = "askpass-cached"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askpass-cache-core",
+ "dirs",
+ "libc",
+ "secrecy",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -83,11 +115,11 @@ name = "askpass-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "askpass-cache-core",
  "dirs",
  "gtk4",
  "libc",
  "secrecy",
- "secure-askpass-core",
  "serde_json",
  "zeroize",
 ]
@@ -1017,38 +1049,6 @@ checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
 dependencies = [
  "serde",
  "zeroize",
-]
-
-[[package]]
-name = "secure-askpass-core"
-version = "0.1.0"
-dependencies = [
- "memsec",
- "proptest",
- "secrecy",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "secure-askpass-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "libc",
- "secrecy",
- "secure-askpass-core",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-journald",
- "tracing-subscriber",
 ]
 
 [[package]]

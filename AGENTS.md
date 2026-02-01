@@ -1,6 +1,6 @@
 # AGENTS.md - Guidelines for AI Coding Agents
 
-This document provides essential information for AI agents working on the secure-askpass codebase.
+This document provides essential information for AI agents working on the askpass-cache codebase.
 
 ## Project Overview
 
@@ -12,8 +12,8 @@ Secure-askpass is a Rust daemon providing secure credential caching for SSH_ASKP
 
 ```
 crates/
-  secure-askpass-core/     # Core types, secure memory utilities
-  secure-askpass-daemon/   # Main daemon process
+  askpass-cache-core/     # Core types, secure memory utilities
+  askpass-cached/   # Main daemon process
   askpass-client/          # Thin binary for SSH_ASKPASS/GIT_ASKPASS/SUDO_ASKPASS
   askpass-cache-ctl/       # CLI utility to list/delete cached credentials
 nix/
@@ -30,7 +30,7 @@ cargo build
 cargo build --release
 
 # Build specific crate
-cargo build -p secure-askpass-daemon
+cargo build -p askpass-cached
 cargo build -p askpass-client
 
 # Using Nix
@@ -45,12 +45,12 @@ nix develop                # Enter dev shell with all dependencies
 cargo test
 
 # Run tests for a specific crate
-cargo test -p secure-askpass-core
-cargo test -p secure-askpass-daemon
+cargo test -p askpass-cache-core
+cargo test -p askpass-cached
 
 # Run a single test by name
 cargo test test_name
-cargo test -p secure-askpass-core test_name
+cargo test -p askpass-cache-core test_name
 
 # Run tests with output
 cargo test -- --nocapture
@@ -113,7 +113,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 // 3. Workspace crates
-use secure_askpass_core::types::CacheType;
+use askpass_cache_core::types::CacheType;
 
 // 4. Current crate modules
 use crate::cache::CredentialCache;
@@ -171,7 +171,7 @@ pub async fn get_credential(&self, key: &str) -> Result<Option<Secret<String>>> 
 - Include examples in doc comments for complex APIs
 
 ```rust
-//! Core types and utilities for secure-askpass
+//! Core types and utilities for askpass-cache
 
 /// A cached credential with automatic expiry.
 ///
@@ -297,7 +297,7 @@ ui-cli = ["dep:rpassword"]
 
 ## Architecture Notes
 
-1. **Core is UI-agnostic:** `secure-askpass-core` has ZERO UI dependencies
+1. **Core is UI-agnostic:** `askpass-cache-core` has ZERO UI dependencies
 2. **Traits for testability:** `PasswordPrompt`, `SocketProvider`, `EventMonitor`
 3. **Security-first:** All secrets use `Secret<T>`, memory is mlocked
 4. **Protocol:** JSON over Unix socket (newline-delimited)

@@ -1,4 +1,4 @@
-//! secure-askpass-daemon - Main entry point.
+//! askpass-cached - Main entry point.
 //!
 //! This is the main daemon process that handles credential caching.
 //! It does NOT display any UI prompts - that's the client's job.
@@ -14,8 +14,8 @@
 //! inherits the display environment from the calling process (SSH, Git, etc).
 
 use anyhow::Result;
-use secure_askpass_core::SocketProvider;
-use secure_askpass_daemon::{Daemon, SystemdSocketProvider};
+use askpass_cache_core::SocketProvider;
+use askpass_cached::{Daemon, SystemdSocketProvider};
 use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        "Starting secure-askpass-daemon"
+        "Starting askpass-cached"
     );
 
     let socket_provider = SystemdSocketProvider::new();

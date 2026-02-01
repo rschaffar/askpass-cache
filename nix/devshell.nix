@@ -64,7 +64,7 @@ mkShell {
 
   # Environment variables for GTK development
   shellHook = ''
-    echo "🔒 secure-askpass development environment"
+    echo "🔒 askpass-cache development environment"
     echo ""
     echo "Available commands:"
     echo "  cargo build              - Build the project"

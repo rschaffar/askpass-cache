@@ -1,6 +1,6 @@
 //! Protocol types for client-daemon communication.
 //!
-//! The secure-askpass protocol uses JSON over Unix sockets with newline-delimited messages.
+//! The askpass-cache protocol uses JSON over Unix sockets with newline-delimited messages.
 //! This module defines the request and response types for the protocol.
 
 use std::collections::hash_map::DefaultHasher;
@@ -20,7 +20,7 @@ use crate::types::CacheType;
 /// # Example
 ///
 /// ```
-/// use secure_askpass_core::protocol::short_id;
+/// use askpass_cache_core::protocol::short_id;
 ///
 /// let id = short_id("ssh-fido:SHA256:xK3NvbHvA5N6TjXd");
 /// assert_eq!(id.len(), 8);

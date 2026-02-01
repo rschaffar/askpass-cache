@@ -1,7 +1,7 @@
-//! Core types for secure-askpass.
+//! Core types for askpass-cache.
 //!
 //! This module contains the fundamental data structures used throughout
-//! the secure-askpass system, primarily cache type definitions.
+//! the askpass-cache system, primarily cache type definitions.
 
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ impl CacheType {
     /// # Examples
     ///
     /// ```
-    /// use secure_askpass_core::types::CacheType;
+    /// use askpass_cache_core::types::CacheType;
     ///
     /// assert_eq!(CacheType::from_cache_id("ssh-fido:SHA256:abc"), CacheType::Ssh);
     /// assert_eq!(CacheType::from_cache_id("git:https://github.com"), CacheType::Git);

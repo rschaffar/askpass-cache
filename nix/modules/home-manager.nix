@@ -8,28 +8,28 @@
 with lib;
 
 let
-  cfg = config.services.secure-askpass;
+  cfg = config.services.askpass-cache;
 
   settingsFormat = pkgs.formats.toml { };
   configFile = settingsFormat.generate "config.toml" cfg.settings;
 in
 {
-  options.services.secure-askpass = {
-    enable = mkEnableOption "secure-askpass credential caching daemon";
+  options.services.askpass-cache = {
+    enable = mkEnableOption "askpass-cache credential caching daemon";
 
     package = mkOption {
       type = types.package;
-      default = pkgs.secure-askpass;
-      defaultText = literalExpression "pkgs.secure-askpass";
-      description = "The secure-askpass package to use.";
+      default = pkgs.askpass-cache;
+      defaultText = literalExpression "pkgs.askpass-cache";
+      description = "The askpass-cache package to use.";
     };
 
     settings = mkOption {
       type = settingsFormat.type;
       default = { };
       description = ''
-        Configuration for secure-askpass.
-        See <https://github.com/rschaffar/secure-askpass/blob/main/CONCEPT.md>
+        Configuration for askpass-cache.
+        See <https://github.com/rschaffar/askpass-cache/blob/main/CONCEPT.md>
         for available options.
       '';
       example = literalExpression ''
@@ -89,7 +89,7 @@ in
     home.packages = [ cfg.package ];
 
     # Generate config file
-    xdg.configFile."secure-askpass/config.toml" = mkIf (cfg.settings != { }) {
+    xdg.configFile."askpass-cache/config.toml" = mkIf (cfg.settings != { }) {
       source = configFile;
     };
 
@@ -108,17 +108,17 @@ in
     ];
 
     # Systemd user service
-    systemd.user.services.secure-askpass = {
+    systemd.user.services.askpass-cached = {
       Unit = {
-        Description = "Secure Askpass Daemon";
-        Documentation = "https://github.com/rschaffar/secure-askpass";
+        Description = "Askpass Cache Daemon";
+        Documentation = "https://github.com/rschaffar/askpass-cache";
         After = [ "graphical-session.target" ];
         PartOf = [ "graphical-session.target" ];
       };
 
       Service = {
         Type = "simple";
-        ExecStart = "${cfg.package}/bin/secure-askpass-daemon";
+        ExecStart = "${cfg.package}/bin/askpass-cached";
         Restart = "on-failure";
         RestartSec = 5;
 
@@ -138,7 +138,7 @@ in
         LockPersonality = true;
 
         # Runtime directory for socket
-        RuntimeDirectory = "secure-askpass";
+        RuntimeDirectory = "askpass-cache";
       };
 
       Install = {

@@ -8,7 +8,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use secure_askpass_core::{SocketError, SocketProvider};
+use askpass_cache_core::{SocketError, SocketProvider};
 use tokio::net::UnixListener;
 use tracing::debug;
 
@@ -155,8 +155,8 @@ mod tests {
     fn default_uses_runtime_dir() {
         let provider = ManualSocketProvider::default();
         let path = provider.socket_path().unwrap();
-        // Should end with secure-askpass/socket
+        // Should end with askpass-cache/socket
         assert!(path.ends_with("socket"));
-        assert!(path.parent().unwrap().ends_with("secure-askpass"));
+        assert!(path.parent().unwrap().ends_with("askpass-cache"));
     }
 }

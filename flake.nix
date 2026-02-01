@@ -37,8 +37,8 @@
         {
           # Package outputs
           packages = {
-            default = self'.packages.secure-askpass;
-            secure-askpass = pkgs.callPackage ./nix/package.nix {
+            default = self'.packages.askpass-cache;
+            askpass-cache = pkgs.callPackage ./nix/package.nix {
               inherit craneLib;
             };
           };
@@ -53,15 +53,15 @@
       flake = {
         # NixOS module
         nixosModules.default = import ./nix/modules/nixos.nix;
-        nixosModules.secure-askpass = import ./nix/modules/nixos.nix;
+        nixosModules.askpass-cache = import ./nix/modules/nixos.nix;
 
         # home-manager module
         homeManagerModules.default = import ./nix/modules/home-manager.nix;
-        homeManagerModules.secure-askpass = import ./nix/modules/home-manager.nix;
+        homeManagerModules.askpass-cache = import ./nix/modules/home-manager.nix;
 
         # Overlay for users who want to integrate into their pkgs
         overlays.default = final: prev: {
-          secure-askpass = final.callPackage ./nix/package.nix {
+          askpass-cache = final.callPackage ./nix/package.nix {
             craneLib = inputs.crane.mkLib final;
           };
         };

@@ -65,8 +65,8 @@ pub enum Confidence {
 /// # Examples
 ///
 /// ```
-/// use secure_askpass_core::cache_id::detect_cache_id;
-/// use secure_askpass_core::types::CacheType;
+/// use askpass_cache_core::cache_id::detect_cache_id;
+/// use askpass_cache_core::types::CacheType;
 ///
 /// // SSH FIDO2 key
 /// let result = detect_cache_id("Enter PIN for ECDSA-SK key SHA256:abc123...");

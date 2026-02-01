@@ -23,7 +23,7 @@ let
   commonArgs = {
     inherit src;
 
-    pname = "secure-askpass";
+    pname = "askpass-cache";
     version = "0.1.0";
 
     strictDeps = true;
@@ -49,7 +49,7 @@ let
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
   # Build the actual package
-  secure-askpass = craneLib.buildPackage (
+  askpass-cache = craneLib.buildPackage (
     commonArgs
     // {
       inherit cargoArtifacts;
@@ -65,16 +65,16 @@ let
           SSH_ASKPASS, GIT_ASKPASS, and SUDO_ASKPASS with per-cache-type
           configuration and security hardening.
         '';
-        homepage = "https://github.com/rschaffar/secure-askpass";
+        homepage = "https://github.com/rschaffar/askpass-cache";
         license = with licenses; [
           mit
           asl20
         ];
         maintainers = [ ];
-        mainProgram = "secure-askpass-daemon";
+        mainProgram = "askpass-cached";
         platforms = platforms.linux;
       };
     }
   );
 in
-secure-askpass
+askpass-cache

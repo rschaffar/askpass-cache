@@ -1,5 +1,5 @@
 [package]
-name = "secure-askpass-core"
+name = "askpass-cache-core"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

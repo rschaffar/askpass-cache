@@ -5,7 +5,7 @@
 //! - [`SystemdSocketProvider`]: Uses systemd socket activation (production)
 //! - [`ManualSocketProvider`]: Binds socket manually (development/testing)
 //!
-//! Both implement the [`SocketProvider`] trait from `secure-askpass-core`.
+//! Both implement the [`SocketProvider`] trait from `askpass-cache-core`.
 
 mod manual;
 mod systemd;
@@ -13,7 +13,7 @@ mod systemd;
 pub use manual::ManualSocketProvider;
 pub use systemd::SystemdSocketProvider;
 
-use secure_askpass_core::SocketProvider;
+use askpass_cache_core::SocketProvider;
 
 /// Create the default socket provider based on environment.
 ///
@@ -31,14 +31,14 @@ pub fn default_provider() -> Box<dyn SocketProvider> {
 
 /// Get the default socket path.
 ///
-/// Returns `$XDG_RUNTIME_DIR/secure-askpass/socket` or falls back to
-/// `/tmp/secure-askpass-$UID/socket` if XDG_RUNTIME_DIR is not set.
+/// Returns `$XDG_RUNTIME_DIR/askpass-cache/socket` or falls back to
+/// `/tmp/askpass-cache-$UID/socket` if XDG_RUNTIME_DIR is not set.
 pub fn default_socket_path() -> std::path::PathBuf {
     if let Some(runtime_dir) = dirs::runtime_dir() {
-        runtime_dir.join("secure-askpass").join("socket")
+        runtime_dir.join("askpass-cache").join("socket")
     } else {
         // Fallback for systems without XDG_RUNTIME_DIR
         let uid = unsafe { libc::getuid() };
-        std::path::PathBuf::from(format!("/tmp/secure-askpass-{}/socket", uid))
+        std::path::PathBuf::from(format!("/tmp/askpass-cache-{}/socket", uid))
     }
 }

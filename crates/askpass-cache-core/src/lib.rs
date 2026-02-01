@@ -1,6 +1,6 @@
-//! Core types and utilities for secure-askpass.
+//! Core types and utilities for askpass-cache.
 //!
-//! This crate provides the fundamental building blocks for the secure-askpass
+//! This crate provides the fundamental building blocks for the askpass-cache
 //! credential caching system. It is intentionally UI-agnostic - the daemon
 //! only handles caching, while the client handles user prompts.
 //!
@@ -15,8 +15,8 @@
 //! # Example
 //!
 //! ```
-//! use secure_askpass_core::types::CacheType;
-//! use secure_askpass_core::protocol::{Request, Response};
+//! use askpass_cache_core::types::CacheType;
+//! use askpass_cache_core::protocol::{Request, Response};
 //!
 //! // Create a credential request
 //! let request = Request::GetCredential {

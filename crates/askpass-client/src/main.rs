@@ -36,26 +36,26 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
+use askpass_cache_core::{CacheType, Request, Response};
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, Entry, Label,
     Orientation,
 };
 use secrecy::{ExposeSecret, SecretString};
-use secure_askpass_core::{CacheType, Request, Response};
 use zeroize::Zeroize;
 
 /// Get the socket path.
 ///
-/// Returns `$XDG_RUNTIME_DIR/secure-askpass/socket` or falls back to
-/// `/tmp/secure-askpass-$UID/socket` if XDG_RUNTIME_DIR is not set.
+/// Returns `$XDG_RUNTIME_DIR/askpass-cache/socket` or falls back to
+/// `/tmp/askpass-cache-$UID/socket` if XDG_RUNTIME_DIR is not set.
 fn get_socket_path() -> PathBuf {
     if let Some(runtime_dir) = dirs::runtime_dir() {
-        runtime_dir.join("secure-askpass").join("socket")
+        runtime_dir.join("askpass-cache").join("socket")
     } else {
         // Fallback for systems without XDG_RUNTIME_DIR
         let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/secure-askpass-{}/socket", uid))
+        PathBuf::from(format!("/tmp/askpass-cache-{}/socket", uid))
     }
 }
 
@@ -158,7 +158,7 @@ fn show_gtk_dialog(prompt_text: &str) -> Result<DialogResult> {
 
     // Create the application
     let app = Application::builder()
-        .application_id("io.github.rschaffar.secure-askpass")
+        .application_id("io.github.rschaffar.askpass-cache")
         .build();
 
     let prompt_text_owned = prompt_text.to_string();
@@ -363,9 +363,9 @@ mod tests {
     #[test]
     fn socket_path_uses_runtime_dir() {
         let path = get_socket_path();
-        // Should end with secure-askpass/socket
+        // Should end with askpass-cache/socket
         assert!(path.ends_with("socket"));
-        assert!(path.parent().unwrap().ends_with("secure-askpass"));
+        assert!(path.parent().unwrap().ends_with("askpass-cache"));
     }
 
     #[test]
