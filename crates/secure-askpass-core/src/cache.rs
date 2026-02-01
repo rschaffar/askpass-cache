@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use secrecy::SecretString;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::types::CacheType;
 
@@ -168,10 +168,12 @@ impl CredentialCache {
 
         if result {
             self.memory_locked = true;
-            debug!("Cache memory locked successfully");
+            info!("Cache memory locked successfully (protected from swapping)");
         } else {
-            // This is common - mlock requires CAP_IPC_LOCK or sufficient RLIMIT_MEMLOCK
-            debug!("Failed to lock cache memory (this is normal for unprivileged processes)");
+            warn!(
+                "Failed to lock cache memory - credentials may be swapped to disk. \
+                 Grant CAP_IPC_LOCK capability or increase RLIMIT_MEMLOCK to fix."
+            );
         }
     }
 

@@ -24,6 +24,19 @@ fn setup_logging() {
     // Use RUST_LOG=debug for verbose output
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
+    // Check if running under systemd (JOURNAL_STREAM is set when stdout/stderr go to journal)
+    if std::env::var("JOURNAL_STREAM").is_ok() {
+        // Use journald for proper log levels in systemctl status / journalctl
+        if let Ok(journald_layer) = tracing_journald::layer() {
+            tracing_subscriber::registry()
+                .with(journald_layer)
+                .with(filter)
+                .init();
+            return;
+        }
+    }
+
+    // Fallback to stderr (for development or non-systemd environments)
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(true))
         .with(filter)
