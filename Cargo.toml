@@ -2,7 +2,7 @@
 members = [
     "crates/secure-askpass-daemon",
     "crates/askpass-client",
-    "crates/askpass-cache-clear",
+    "crates/askpass-cache-ctl",
     "crates/secure-askpass-core",
 ]
 resolver = "2"

@@ -15,7 +15,7 @@ crates/
   secure-askpass-core/     # Core types, secure memory utilities
   secure-askpass-daemon/   # Main daemon process
   askpass-client/          # Thin binary for SSH_ASKPASS/GIT_ASKPASS/SUDO_ASKPASS
-  askpass-cache-clear/     # Utility to manually clear cache
+  askpass-cache-ctl/       # CLI utility to list/delete cached credentials
 nix/
   package.nix              # Nix build definition
   devshell.nix             # Development environment

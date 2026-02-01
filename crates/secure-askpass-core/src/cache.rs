@@ -267,6 +267,14 @@ impl CredentialCache {
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(|s| s.as_str())
     }
+
+    /// Iterate over all cache entries (key and credential metadata).
+    ///
+    /// This is used by the `ListCache` command to enumerate cached credentials.
+    /// Note: This includes expired entries that haven't been cleaned up yet.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &CachedCredential)> {
+        self.entries.iter()
+    }
 }
 
 impl Default for CredentialCache {
@@ -553,5 +561,35 @@ mod tests {
         assert_eq!(cache.len(), 2);
         assert!(cache.get("git:https://github.com").is_some());
         assert!(cache.get("sudo:user").is_some());
+    }
+
+    #[test]
+    fn cache_iter() {
+        let mut cache = CredentialCache::new();
+        cache.insert(
+            "key1",
+            SecretString::from("secret1"),
+            Duration::from_secs(3600),
+            CacheType::Ssh,
+        );
+        cache.insert(
+            "key2",
+            SecretString::from("secret2"),
+            Duration::from_secs(3600),
+            CacheType::Git,
+        );
+
+        let entries: Vec<_> = cache.iter().collect();
+        assert_eq!(entries.len(), 2);
+
+        // Check that we can access both keys and credentials
+        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"key1"));
+        assert!(keys.contains(&"key2"));
+
+        // Check that we can access credential metadata
+        for (_, cred) in &entries {
+            assert!(!cred.is_expired());
+        }
     }
 }

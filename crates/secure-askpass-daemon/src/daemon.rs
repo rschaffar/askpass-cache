@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use secrecy::SecretString;
 use secure_askpass_core::{
-    cache_id::detect_cache_id, CacheType, CredentialCache, ErrorCode, EventMonitor,
+    cache_id::detect_cache_id, CacheEntryInfo, CacheType, CredentialCache, ErrorCode, EventMonitor,
     NoOpEventMonitor, Request, Response, SocketProvider,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -165,6 +165,7 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
                 cache_type,
             } => self.handle_clear_cache(cache_id, cache_type, cache).await,
             Request::Ping => Response::Pong,
+            Request::ListCache => self.handle_list_cache(cache).await,
         }
     }
 
@@ -263,6 +264,26 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
 
         info!(count = count, cache_id = %cache_id, "Cleared cache");
         Response::cache_cleared(count)
+    }
+
+    /// Handle a ListCache request.
+    ///
+    /// Returns metadata about all cached credentials without exposing secrets.
+    async fn handle_list_cache(&self, cache: Arc<Mutex<CredentialCache>>) -> Response {
+        let cache_guard = cache.lock().await;
+        let entries: Vec<CacheEntryInfo> = cache_guard
+            .iter()
+            .map(|(key, cred)| {
+                CacheEntryInfo::new(
+                    key.clone(),
+                    cred.cache_type(),
+                    cred.time_remaining().map(|d| d.as_secs()),
+                )
+            })
+            .collect();
+
+        debug!(count = entries.len(), "Listed cache entries");
+        Response::cache_entries(entries)
     }
 
     /// Send a response to the client.
@@ -528,6 +549,80 @@ mod tests {
                 assert!(cache_id.starts_with("ssh-fido:"));
             }
             _ => panic!("Expected cache miss response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_list_cache_empty() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::new(socket);
+
+        let cache = Arc::clone(daemon.cache());
+        let response = daemon.handle_request(Request::ListCache, cache).await;
+
+        match response {
+            Response::CacheEntries { entries } => {
+                assert!(entries.is_empty());
+            }
+            _ => panic!("Expected cache entries response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_list_cache_with_entries() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::new(socket);
+
+        // Pre-populate cache
+        {
+            let mut cache = daemon.cache().lock().await;
+            cache.insert(
+                "ssh-fido:SHA256:abc123",
+                SecretString::from("pin1"),
+                Duration::from_secs(1800),
+                CacheType::Ssh,
+            );
+            cache.insert(
+                "git:https://github.com",
+                SecretString::from("token"),
+                Duration::from_secs(7200),
+                CacheType::Git,
+            );
+        }
+
+        let cache = Arc::clone(daemon.cache());
+        let response = daemon.handle_request(Request::ListCache, cache).await;
+
+        match response {
+            Response::CacheEntries { entries } => {
+                assert_eq!(entries.len(), 2);
+
+                // Find entries by cache_id
+                let ssh_entry = entries
+                    .iter()
+                    .find(|e| e.cache_id == "ssh-fido:SHA256:abc123");
+                let git_entry = entries
+                    .iter()
+                    .find(|e| e.cache_id == "git:https://github.com");
+
+                assert!(ssh_entry.is_some());
+                assert!(git_entry.is_some());
+
+                let ssh = ssh_entry.unwrap();
+                assert_eq!(ssh.cache_type, CacheType::Ssh);
+                assert_eq!(ssh.id.len(), 8); // Short ID is 8 hex chars
+                assert!(ssh.ttl_remaining_secs.is_some());
+
+                let git = git_entry.unwrap();
+                assert_eq!(git.cache_type, CacheType::Git);
+            }
+            _ => panic!("Expected cache entries response"),
         }
     }
 }

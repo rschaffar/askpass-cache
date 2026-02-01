@@ -119,8 +119,8 @@ secure-askpass-daemon/         # Cache daemon (NO UI dependencies)
 askpass-client/                # UI client (has GTK4 dependency)
 └── main.rs                    # GTK4 dialog, daemon communication
 
-askpass-cache-clear/           # CLI utility
-└── main.rs                    # Manual cache clearing
+askpass-cache-ctl/             # CLI utility
+└── main.rs                    # List/delete cached credentials
 ```
 
 **Key Principles:**
@@ -255,20 +255,31 @@ remember_check.set_active(true);  // Checked by default
 - Parses prompt text to determine type (SSH key fingerprint, Git URL, etc.)
 - Falls back to hash of full prompt if unrecognized
 
-#### 3. `askpass-cache-clear`
+#### 3. `askpass-cache-ctl`
 
-Utility to manually clear the cache.
+Utility to list and manage cached credentials.
 
 ```bash
-# Clear all cached credentials
-askpass-cache-clear --all
+# List all cached credentials (metadata only, no secrets)
+askpass-cache-ctl list
 
-# Clear specific cache entry
-askpass-cache-clear --id "ssh-fido:SHA256:abc123..."
+# Example output:
+# ID       TYPE   CACHE ID                               TTL
+# a7f3b2c1 ssh    ssh-fido:SHA256:xK3NvbHvA5N6TjXd...   24m 30s
+# f2e8d1a0 git    git:https://github.com                1h 45m
 
-# Clear by type
-askpass-cache-clear --type ssh
-askpass-cache-clear --type git
+# Delete by short ID
+askpass-cache-ctl delete a7f3b2c1
+
+# Delete all cached credentials
+askpass-cache-ctl delete --all
+
+# Delete by type
+askpass-cache-ctl delete --type ssh
+askpass-cache-ctl delete --type git
+
+# Check daemon status
+askpass-cache-ctl ping
 ```
 
 ### Testing Strategy
@@ -806,7 +817,7 @@ ui-cli = ["dep:rpassword"]  # CLI fallback
 #### Phase 3: Configuration & Polish (IN PROGRESS)
 - [ ] Configuration file parsing in daemon
 - [ ] CLI arguments for daemon (`--config`, `--socket`, `--verbose`)
-- [ ] `askpass-cache-clear` utility (currently placeholder)
+- [x] `askpass-cache-ctl` utility (list, delete, ping commands)
 - [ ] Timeout with visual countdown in dialog
 - [ ] Password visibility toggle in dialog
 

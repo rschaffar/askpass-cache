@@ -3,11 +3,70 @@
 //! The secure-askpass protocol uses JSON over Unix sockets with newline-delimited messages.
 //! This module defines the request and response types for the protocol.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::types::CacheType;
+
+/// Generate an 8-character short ID from a cache ID.
+///
+/// This creates a human-friendly identifier for use in CLI tools.
+/// The ID is deterministic - the same cache_id always produces the same short ID.
+///
+/// # Example
+///
+/// ```
+/// use secure_askpass_core::protocol::short_id;
+///
+/// let id = short_id("ssh-fido:SHA256:xK3NvbHvA5N6TjXd");
+/// assert_eq!(id.len(), 8);
+/// assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+/// ```
+pub fn short_id(cache_id: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    cache_id.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
+}
+
+/// Metadata about a cached credential (no secrets exposed).
+///
+/// Used by the `ListCache` command to show what's in the cache
+/// without revealing credential values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CacheEntryInfo {
+    /// Short 8-character hex ID for easy reference in CLI.
+    pub id: String,
+
+    /// Full cache key (e.g., "ssh-fido:SHA256:..." or "git:https://github.com").
+    pub cache_id: String,
+
+    /// Type of credential.
+    pub cache_type: CacheType,
+
+    /// Seconds until this entry expires (None if already expired but not cleaned up).
+    pub ttl_remaining_secs: Option<u64>,
+}
+
+impl CacheEntryInfo {
+    /// Create a new cache entry info.
+    pub fn new(
+        cache_id: impl Into<String>,
+        cache_type: CacheType,
+        ttl_remaining_secs: Option<u64>,
+    ) -> Self {
+        let cache_id = cache_id.into();
+        Self {
+            id: short_id(&cache_id),
+            cache_id,
+            cache_type,
+            ttl_remaining_secs,
+        }
+    }
+}
 
 /// A request from the client to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +122,9 @@ pub enum Request {
 
     /// Ping the daemon (health check).
     Ping,
+
+    /// List all cached credentials (metadata only, no secrets).
+    ListCache,
 }
 
 fn default_cache_id() -> String {
@@ -114,6 +176,12 @@ pub enum Response {
 
     /// Response to a ping request.
     Pong,
+
+    /// List of cached credentials (metadata only).
+    CacheEntries {
+        /// Information about each cached credential.
+        entries: Vec<CacheEntryInfo>,
+    },
 }
 
 /// Error codes for protocol errors.
@@ -211,6 +279,11 @@ impl Response {
     /// Create a cache cleared response.
     pub fn cache_cleared(count: usize) -> Self {
         Response::CacheCleared { count }
+    }
+
+    /// Create a cache entries response.
+    pub fn cache_entries(entries: Vec<CacheEntryInfo>) -> Self {
+        Response::CacheEntries { entries }
     }
 }
 
@@ -450,5 +523,90 @@ mod tests {
     fn unknown_type_returns_error() {
         let result: Result<Request, _> = serde_json::from_str(r#"{"type": "unknown_type"}"#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn short_id_is_8_hex_chars() {
+        let id = super::short_id("ssh-fido:SHA256:xK3NvbHvA5N6TjXd");
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn short_id_is_deterministic() {
+        let id1 = super::short_id("test-cache-id");
+        let id2 = super::short_id("test-cache-id");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn short_id_different_inputs_different_outputs() {
+        let id1 = super::short_id("cache-id-1");
+        let id2 = super::short_id("cache-id-2");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn cache_entry_info_new() {
+        let info = CacheEntryInfo::new("ssh-fido:SHA256:abc", CacheType::Ssh, Some(1800));
+        assert_eq!(info.id.len(), 8);
+        assert_eq!(info.cache_id, "ssh-fido:SHA256:abc");
+        assert_eq!(info.cache_type, CacheType::Ssh);
+        assert_eq!(info.ttl_remaining_secs, Some(1800));
+    }
+
+    #[test]
+    fn cache_entry_info_serde_roundtrip() {
+        let info = CacheEntryInfo::new("git:https://github.com", CacheType::Git, Some(7200));
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: CacheEntryInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, parsed);
+    }
+
+    #[test]
+    fn request_list_cache_serde_roundtrip() {
+        let request = Request::ListCache;
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(json, r#"{"type":"list_cache"}"#);
+
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, Request::ListCache));
+    }
+
+    #[test]
+    fn response_cache_entries_serde_roundtrip() {
+        let entries = vec![
+            CacheEntryInfo::new("ssh-fido:SHA256:abc", CacheType::Ssh, Some(1800)),
+            CacheEntryInfo::new("git:https://github.com", CacheType::Git, Some(7200)),
+        ];
+        let response = Response::cache_entries(entries.clone());
+
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Response::CacheEntries {
+                entries: parsed_entries,
+            } => {
+                assert_eq!(parsed_entries.len(), 2);
+                assert_eq!(parsed_entries[0].cache_type, CacheType::Ssh);
+                assert_eq!(parsed_entries[1].cache_type, CacheType::Git);
+            }
+            _ => panic!("Wrong response type"),
+        }
+    }
+
+    #[test]
+    fn response_cache_entries_empty() {
+        let response = Response::cache_entries(vec![]);
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Response::CacheEntries { entries } => {
+                assert!(entries.is_empty());
+            }
+            _ => panic!("Wrong response type"),
+        }
     }
 }
