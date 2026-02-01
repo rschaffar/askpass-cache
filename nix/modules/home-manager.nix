@@ -122,6 +122,13 @@ in
         Restart = "on-failure";
         RestartSec = 5;
 
+        # Pass through display environment for GTK
+        PassEnvironment = [
+          "DISPLAY"
+          "WAYLAND_DISPLAY"
+          "XDG_SESSION_TYPE"
+        ];
+
         # Security hardening
         MemoryDenyWriteExecute = true;
         NoNewPrivileges = true;
