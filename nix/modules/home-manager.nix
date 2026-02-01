@@ -62,13 +62,25 @@ in
       '';
     };
 
-    enableSessionVariables = mkOption {
+    enableSshAskpass = mkOption {
       type = types.bool;
-      default = true;
+      default = false;
       description = ''
-        Whether to set SSH_ASKPASS, GIT_ASKPASS, and SUDO_ASKPASS
-        environment variables automatically.
+        Whether to set SSH_ASKPASS and SSH_ASKPASS_REQUIRE environment variables.
+        When false, you can manually set SSH_ASKPASS where needed (e.g., on specific services).
       '';
+    };
+
+    enableGitAskpass = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Whether to set GIT_ASKPASS environment variable.";
+    };
+
+    enableSudoAskpass = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Whether to set SUDO_ASKPASS environment variable.";
     };
   };
 
@@ -81,13 +93,19 @@ in
       source = configFile;
     };
 
-    # Set environment variables
-    home.sessionVariables = mkIf cfg.enableSessionVariables {
-      SSH_ASKPASS = "${cfg.package}/bin/askpass-client";
-      SSH_ASKPASS_REQUIRE = "prefer";
-      GIT_ASKPASS = "${cfg.package}/bin/askpass-client";
-      SUDO_ASKPASS = "${cfg.package}/bin/askpass-client";
-    };
+    # Set environment variables (each can be enabled independently)
+    home.sessionVariables = mkMerge [
+      (mkIf cfg.enableSshAskpass {
+        SSH_ASKPASS = "${cfg.package}/bin/askpass-client";
+        SSH_ASKPASS_REQUIRE = "prefer";
+      })
+      (mkIf cfg.enableGitAskpass {
+        GIT_ASKPASS = "${cfg.package}/bin/askpass-client";
+      })
+      (mkIf cfg.enableSudoAskpass {
+        SUDO_ASKPASS = "${cfg.package}/bin/askpass-client";
+      })
+    ];
 
     # Systemd user service
     systemd.user.services.secure-askpass = {
