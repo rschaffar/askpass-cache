@@ -24,6 +24,11 @@ use crate::types::CacheType;
 ///
 /// This struct holds a credential along with its creation time and TTL,
 /// allowing for automatic expiry checks.
+///
+/// Credentials can be in two states:
+/// - **Unconfirmed**: Stored but not yet verified by the user. These are NOT
+///   returned by `CredentialCache::get()` and are invisible to `GetCredential`.
+/// - **Confirmed**: Verified by the user and available for use.
 pub struct CachedCredential {
     /// The secret credential value.
     secret: SecretString,
@@ -33,16 +38,28 @@ pub struct CachedCredential {
     ttl: Duration,
     /// The type of credential (for clearing policies).
     cache_type: CacheType,
+    /// Whether the credential has been confirmed by the user.
+    /// Unconfirmed credentials are not returned by `get()`.
+    confirmed: bool,
 }
 
 impl CachedCredential {
     /// Create a new cached credential.
-    pub fn new(secret: SecretString, ttl: Duration, cache_type: CacheType) -> Self {
+    ///
+    /// If `confirmed` is `false`, the credential will not be returned by
+    /// `CredentialCache::get()` until it is confirmed.
+    pub fn new(
+        secret: SecretString,
+        ttl: Duration,
+        cache_type: CacheType,
+        confirmed: bool,
+    ) -> Self {
         Self {
             secret,
             created_at: Instant::now(),
             ttl,
             cache_type,
+            confirmed,
         }
     }
 
@@ -75,6 +92,18 @@ impl CachedCredential {
     pub fn secret(&self) -> &SecretString {
         &self.secret
     }
+
+    /// Check if this credential has been confirmed by the user.
+    ///
+    /// Unconfirmed credentials are not returned by `CredentialCache::get()`.
+    pub fn is_confirmed(&self) -> bool {
+        self.confirmed
+    }
+
+    /// Set the confirmed state of this credential.
+    pub fn set_confirmed(&mut self, confirmed: bool) {
+        self.confirmed = confirmed;
+    }
 }
 
 // Manual Debug implementation to avoid exposing secrets
@@ -85,6 +114,7 @@ impl std::fmt::Debug for CachedCredential {
             .field("created_at", &self.created_at)
             .field("ttl", &self.ttl)
             .field("cache_type", &self.cache_type)
+            .field("confirmed", &self.confirmed)
             .finish()
     }
 }
@@ -110,15 +140,16 @@ impl std::fmt::Debug for CachedCredential {
 ///
 /// let mut cache = CredentialCache::new();
 ///
-/// // Insert a credential
+/// // Insert a confirmed credential
 /// cache.insert(
 ///     "ssh-fido:SHA256:abc123",
 ///     SecretString::from("my-pin"),
 ///     Duration::from_secs(1800),
 ///     CacheType::Ssh,
+///     true, // confirmed
 /// );
 ///
-/// // Retrieve it
+/// // Retrieve it (only confirmed credentials are returned)
 /// if let Some(cred) = cache.get("ssh-fido:SHA256:abc123") {
 ///     // Use the credential...
 /// }
@@ -179,25 +210,73 @@ impl CredentialCache {
 
     /// Insert a credential into the cache.
     ///
-    /// If a credential with the same key exists, it is replaced.
+    /// If a credential with the same key exists, it is replaced (whether confirmed or not).
+    ///
+    /// If `confirmed` is `false`, the credential will not be returned by `get()`
+    /// until it is confirmed via `confirm()`.
     pub fn insert(
         &mut self,
         key: &str,
         secret: SecretString,
         ttl: Duration,
         cache_type: CacheType,
+        confirmed: bool,
     ) {
-        trace!(key = %key, cache_type = %cache_type, ttl_secs = ttl.as_secs(), "Inserting credential");
-        let credential = CachedCredential::new(secret, ttl, cache_type);
+        trace!(key = %key, cache_type = %cache_type, ttl_secs = ttl.as_secs(), confirmed = confirmed, "Inserting credential");
+        let credential = CachedCredential::new(secret, ttl, cache_type, confirmed);
         self.entries.insert(key.to_string(), credential);
     }
 
-    /// Get a credential from the cache.
+    /// Get a confirmed credential from the cache.
     ///
-    /// Returns `None` if the key doesn't exist or the credential has expired.
+    /// Returns `None` if:
+    /// - The key doesn't exist
+    /// - The credential has expired
+    /// - The credential is unconfirmed
+    ///
     /// Expired credentials are NOT automatically removed by this method.
     pub fn get(&self, key: &str) -> Option<&CachedCredential> {
+        self.entries
+            .get(key)
+            .filter(|cred| !cred.is_expired() && cred.is_confirmed())
+    }
+
+    /// Get any credential from the cache, regardless of confirmation state.
+    ///
+    /// This is useful for internal operations that need to check if a key exists.
+    /// Returns `None` if the key doesn't exist or the credential has expired.
+    pub fn get_any(&self, key: &str) -> Option<&CachedCredential> {
         self.entries.get(key).filter(|cred| !cred.is_expired())
+    }
+
+    /// Remove an unconfirmed credential from the cache.
+    ///
+    /// Returns `true` if an unconfirmed credential was removed.
+    /// Does nothing if the credential doesn't exist or is confirmed.
+    pub fn remove_unconfirmed(&mut self, key: &str) -> bool {
+        if let Some(cred) = self.entries.get(key) {
+            if !cred.is_confirmed() {
+                self.entries.remove(key);
+                trace!(key = %key, "Removed unconfirmed credential");
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Confirm a credential, making it available via `get()`.
+    ///
+    /// Returns `true` if the credential was found and confirmed.
+    /// Returns `false` if the credential doesn't exist or has expired.
+    pub fn confirm(&mut self, key: &str) -> bool {
+        if let Some(cred) = self.entries.get_mut(key) {
+            if !cred.is_expired() {
+                cred.set_confirmed(true);
+                debug!(key = %key, "Confirmed credential");
+                return true;
+            }
+        }
+        false
     }
 
     /// Remove a credential from the cache.
@@ -315,6 +394,7 @@ mod tests {
             SecretString::from("test-secret"),
             Duration::from_secs(3600),
             CacheType::Custom,
+            true, // confirmed
         );
 
         let cred = cache.get("test-key").expect("credential should exist");
@@ -336,6 +416,7 @@ mod tests {
             SecretString::from("test-secret"),
             Duration::from_secs(3600),
             CacheType::Custom,
+            true,
         );
 
         assert!(cache.remove("test-key"));
@@ -351,12 +432,14 @@ mod tests {
             SecretString::from("secret1"),
             Duration::from_secs(3600),
             CacheType::Ssh,
+            true,
         );
         cache.insert(
             "key2",
             SecretString::from("secret2"),
             Duration::from_secs(3600),
             CacheType::Git,
+            true,
         );
 
         assert_eq!(cache.len(), 2);
@@ -372,18 +455,21 @@ mod tests {
             SecretString::from("secret1"),
             Duration::from_secs(3600),
             CacheType::Ssh,
+            true,
         );
         cache.insert(
             "ssh2",
             SecretString::from("secret2"),
             Duration::from_secs(3600),
             CacheType::Ssh,
+            true,
         );
         cache.insert(
             "git1",
             SecretString::from("secret3"),
             Duration::from_secs(3600),
             CacheType::Git,
+            true,
         );
 
         let removed = cache.clear_by_type(CacheType::Ssh);
@@ -401,6 +487,7 @@ mod tests {
             SecretString::from("secret"),
             Duration::from_millis(50),
             CacheType::Custom,
+            true,
         );
 
         // Should be accessible immediately
@@ -424,12 +511,14 @@ mod tests {
             SecretString::from("secret1"),
             Duration::from_millis(50),
             CacheType::Custom,
+            true,
         );
         cache.insert(
             "long-lived",
             SecretString::from("secret2"),
             Duration::from_secs(3600),
             CacheType::Custom,
+            true,
         );
 
         // Wait for short-lived to expire
@@ -450,12 +539,14 @@ mod tests {
             SecretString::from("original"),
             Duration::from_secs(3600),
             CacheType::Custom,
+            true,
         );
         cache.insert(
             "key",
             SecretString::from("replacement"),
             Duration::from_secs(3600),
             CacheType::Custom,
+            true,
         );
 
         let cred = cache.get("key").expect("credential should exist");
@@ -468,6 +559,7 @@ mod tests {
             SecretString::from("secret"),
             Duration::from_secs(10),
             CacheType::Custom,
+            true,
         );
 
         let remaining = cred.time_remaining().expect("should have time remaining");
@@ -481,6 +573,7 @@ mod tests {
             SecretString::from("secret"),
             Duration::from_millis(10),
             CacheType::Custom,
+            true,
         );
 
         sleep(Duration::from_millis(50));
@@ -495,6 +588,7 @@ mod tests {
             SecretString::from("super-secret"),
             Duration::from_secs(10),
             CacheType::Custom,
+            true,
         );
 
         let debug_output = format!("{:?}", cred);
@@ -510,12 +604,14 @@ mod tests {
             SecretString::from("secret1"),
             Duration::from_secs(3600),
             CacheType::Custom,
+            true,
         );
         cache.insert(
             "key2",
             SecretString::from("secret2"),
             Duration::from_secs(3600),
             CacheType::Custom,
+            true,
         );
 
         let keys: Vec<_> = cache.keys().collect();
@@ -540,18 +636,21 @@ mod tests {
             SecretString::from("pin1"),
             Duration::from_secs(1800),
             CacheType::Ssh,
+            true,
         );
         cache.insert(
             "git:https://github.com",
             SecretString::from("token"),
             Duration::from_secs(7200),
             CacheType::Git,
+            true,
         );
         cache.insert(
             "sudo:user",
             SecretString::from("password"),
             Duration::from_secs(300),
             CacheType::Sudo,
+            true,
         );
 
         assert_eq!(cache.len(), 3);
@@ -571,12 +670,14 @@ mod tests {
             SecretString::from("secret1"),
             Duration::from_secs(3600),
             CacheType::Ssh,
+            true,
         );
         cache.insert(
             "key2",
             SecretString::from("secret2"),
             Duration::from_secs(3600),
             CacheType::Git,
+            true,
         );
 
         let entries: Vec<_> = cache.iter().collect();
@@ -591,5 +692,112 @@ mod tests {
         for (_, cred) in &entries {
             assert!(!cred.is_expired());
         }
+    }
+
+    #[test]
+    fn unconfirmed_credential_not_returned_by_get() {
+        let mut cache = CredentialCache::new();
+        cache.insert(
+            "test-key",
+            SecretString::from("secret"),
+            Duration::from_secs(3600),
+            CacheType::Custom,
+            false, // unconfirmed
+        );
+
+        // get() should not return unconfirmed credentials
+        assert!(cache.get("test-key").is_none());
+
+        // But get_any() should
+        assert!(cache.get_any("test-key").is_some());
+    }
+
+    #[test]
+    fn confirm_promotes_to_confirmed() {
+        let mut cache = CredentialCache::new();
+        cache.insert(
+            "test-key",
+            SecretString::from("secret"),
+            Duration::from_secs(3600),
+            CacheType::Custom,
+            false, // unconfirmed
+        );
+
+        // Not visible via get() initially
+        assert!(cache.get("test-key").is_none());
+
+        // Confirm it
+        assert!(cache.confirm("test-key"));
+
+        // Now visible via get()
+        let cred = cache
+            .get("test-key")
+            .expect("should be visible after confirm");
+        assert_eq!(cred.secret().expose_secret(), "secret");
+        assert!(cred.is_confirmed());
+    }
+
+    #[test]
+    fn confirm_nonexistent_returns_false() {
+        let mut cache = CredentialCache::new();
+        assert!(!cache.confirm("nonexistent"));
+    }
+
+    #[test]
+    fn insert_replaces_unconfirmed() {
+        let mut cache = CredentialCache::new();
+
+        // Insert unconfirmed
+        cache.insert(
+            "key",
+            SecretString::from("first"),
+            Duration::from_secs(3600),
+            CacheType::Custom,
+            false,
+        );
+
+        // Replace with another unconfirmed
+        cache.insert(
+            "key",
+            SecretString::from("second"),
+            Duration::from_secs(3600),
+            CacheType::Custom,
+            false,
+        );
+
+        let cred = cache.get_any("key").expect("should exist");
+        assert_eq!(cred.secret().expose_secret(), "second");
+        assert!(!cred.is_confirmed());
+    }
+
+    #[test]
+    fn remove_unconfirmed_only_affects_unconfirmed() {
+        let mut cache = CredentialCache::new();
+
+        // Insert confirmed
+        cache.insert(
+            "confirmed-key",
+            SecretString::from("secret1"),
+            Duration::from_secs(3600),
+            CacheType::Custom,
+            true,
+        );
+
+        // Insert unconfirmed
+        cache.insert(
+            "unconfirmed-key",
+            SecretString::from("secret2"),
+            Duration::from_secs(3600),
+            CacheType::Custom,
+            false,
+        );
+
+        // remove_unconfirmed should not affect confirmed
+        assert!(!cache.remove_unconfirmed("confirmed-key"));
+        assert!(cache.get("confirmed-key").is_some());
+
+        // remove_unconfirmed should remove unconfirmed
+        assert!(cache.remove_unconfirmed("unconfirmed-key"));
+        assert!(cache.get_any("unconfirmed-key").is_none());
     }
 }

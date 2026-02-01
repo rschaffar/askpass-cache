@@ -107,6 +107,18 @@ pub enum Request {
         /// TTL override in seconds (optional, uses cache type default if not provided).
         #[serde(default)]
         ttl: Option<u64>,
+
+        /// Whether the credential is confirmed (default: true for backwards compatibility).
+        /// Unconfirmed credentials are not returned by `GetCredential` until confirmed.
+        #[serde(default = "default_confirmed")]
+        confirmed: Option<bool>,
+    },
+
+    /// Confirm a previously stored unconfirmed credential.
+    /// This promotes the credential so it can be returned by `GetCredential`.
+    ConfirmCredential {
+        /// The cache ID of the credential to confirm.
+        cache_id: String,
     },
 
     /// Clear cached credentials.
@@ -129,6 +141,10 @@ pub enum Request {
 
 fn default_cache_id() -> String {
     "auto".to_string()
+}
+
+fn default_confirmed() -> Option<bool> {
+    Some(true) // Default to confirmed for backwards compatibility
 }
 
 /// A response from the daemon to the client.
@@ -158,6 +174,9 @@ pub enum Response {
 
     /// Confirmation that a credential was stored.
     Stored,
+
+    /// Confirmation that a credential was confirmed (promoted from unconfirmed state).
+    Confirmed,
 
     /// An error response.
     Error {
@@ -199,6 +218,9 @@ pub enum ErrorCode {
 
     /// Daemon is shutting down.
     ShuttingDown,
+
+    /// Requested resource not found.
+    NotFound,
 }
 
 impl std::fmt::Display for ErrorCode {
@@ -208,6 +230,7 @@ impl std::fmt::Display for ErrorCode {
             ErrorCode::InvalidRequest => write!(f, "invalid_request"),
             ErrorCode::InternalError => write!(f, "internal_error"),
             ErrorCode::ShuttingDown => write!(f, "shutting_down"),
+            ErrorCode::NotFound => write!(f, "not_found"),
         }
     }
 }
@@ -266,6 +289,11 @@ impl Response {
     /// Create a stored confirmation response.
     pub fn stored() -> Self {
         Response::Stored
+    }
+
+    /// Create a confirmed response (credential promoted from unconfirmed).
+    pub fn confirmed() -> Self {
+        Response::Confirmed
     }
 
     /// Create an error response.
@@ -344,6 +372,7 @@ mod tests {
             value: SecretString::from("secret123"),
             cache_type: Some(CacheType::Ssh),
             ttl: Some(1800),
+            confirmed: Some(true),
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -355,11 +384,13 @@ mod tests {
                 value,
                 cache_type,
                 ttl,
+                confirmed,
             } => {
                 assert_eq!(cache_id, "ssh-fido:SHA256:abc");
                 assert_eq!(value.expose_secret(), "secret123");
                 assert_eq!(cache_type, Some(CacheType::Ssh));
                 assert_eq!(ttl, Some(1800));
+                assert_eq!(confirmed, Some(true));
             }
             _ => panic!("Wrong request type"),
         }
@@ -489,6 +520,7 @@ mod tests {
         assert_eq!(ErrorCode::InvalidRequest.to_string(), "invalid_request");
         assert_eq!(ErrorCode::InternalError.to_string(), "internal_error");
         assert_eq!(ErrorCode::ShuttingDown.to_string(), "shutting_down");
+        assert_eq!(ErrorCode::NotFound.to_string(), "not_found");
     }
 
     #[test]
@@ -498,6 +530,7 @@ mod tests {
             ErrorCode::InvalidRequest,
             ErrorCode::InternalError,
             ErrorCode::ShuttingDown,
+            ErrorCode::NotFound,
         ];
 
         for code in codes {
@@ -605,6 +638,85 @@ mod tests {
         match parsed {
             Response::CacheEntries { entries } => {
                 assert!(entries.is_empty());
+            }
+            _ => panic!("Wrong response type"),
+        }
+    }
+
+    #[test]
+    fn request_store_credential_with_confirmed_false() {
+        let request = Request::StoreCredential {
+            cache_id: "test-key".to_string(),
+            value: SecretString::from("secret"),
+            cache_type: Some(CacheType::Ssh),
+            ttl: None,
+            confirmed: Some(false),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Request::StoreCredential { confirmed, .. } => {
+                assert_eq!(confirmed, Some(false));
+            }
+            _ => panic!("Wrong request type"),
+        }
+    }
+
+    #[test]
+    fn request_store_credential_confirmed_defaults_to_true() {
+        // Test that missing confirmed field defaults to true (backwards compat)
+        let json = r#"{"type":"store_credential","cache_id":"test","value":"secret"}"#;
+        let parsed: Request = serde_json::from_str(json).unwrap();
+
+        match parsed {
+            Request::StoreCredential { confirmed, .. } => {
+                assert_eq!(confirmed, Some(true));
+            }
+            _ => panic!("Wrong request type"),
+        }
+    }
+
+    #[test]
+    fn request_confirm_credential_serde_roundtrip() {
+        let request = Request::ConfirmCredential {
+            cache_id: "ssh-fido:SHA256:abc".to_string(),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("confirm_credential"));
+
+        let parsed: Request = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Request::ConfirmCredential { cache_id } => {
+                assert_eq!(cache_id, "ssh-fido:SHA256:abc");
+            }
+            _ => panic!("Wrong request type"),
+        }
+    }
+
+    #[test]
+    fn response_confirmed_serde_roundtrip() {
+        let response = Response::confirmed();
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"type":"confirmed"}"#);
+
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, Response::Confirmed));
+    }
+
+    #[test]
+    fn error_code_not_found() {
+        let response = Response::error(ErrorCode::NotFound, "Credential not found");
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::NotFound);
+                assert_eq!(message, "Credential not found");
             }
             _ => panic!("Wrong response type"),
         }

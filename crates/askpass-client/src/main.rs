@@ -33,10 +33,11 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result};
 use askpass_cache_core::{CacheType, Request, Response};
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, Entry, Label,
@@ -120,19 +121,64 @@ fn get_cached_credential(prompt: &str) -> Result<Response> {
 }
 
 /// Store a credential in the daemon cache.
+///
+/// If `confirmed` is `false`, the credential is stored in an unconfirmed state
+/// and will not be returned by GetCredential until confirmed.
 fn store_credential(
     cache_id: &str,
     value: SecretString,
     cache_type: CacheType,
+    confirmed: bool,
 ) -> Result<Response> {
     let request = Request::StoreCredential {
         cache_id: cache_id.to_string(),
         value,
         cache_type: Some(cache_type),
         ttl: None, // Use default TTL for the cache type
+        confirmed: Some(confirmed),
     };
 
     send_request(&request)
+}
+
+/// Send a ConfirmCredential request to the daemon.
+fn confirm_credential(cache_id: &str) -> Result<Response> {
+    let request = Request::ConfirmCredential {
+        cache_id: cache_id.to_string(),
+    };
+
+    send_request(&request)
+}
+
+/// Send a ClearCache request to clear a specific credential.
+fn clear_credential(cache_id: &str) -> Result<Response> {
+    let request = Request::ClearCache {
+        cache_id: cache_id.to_string(),
+        cache_type: None,
+    };
+
+    send_request(&request)
+}
+
+/// Spawn a confirmation dialog in a separate process.
+///
+/// This is called after the credential has been stored as unconfirmed
+/// and printed to stdout. The confirmation dialog will run asynchronously
+/// and confirm or clear the credential based on user input.
+fn spawn_confirmation_dialog(cache_id: &str, prompt: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("Failed to get current executable path")?;
+
+    Command::new(exe)
+        .arg("--confirm")
+        .arg(cache_id)
+        .arg(prompt)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit()) // Allow errors to be seen
+        .spawn()
+        .context("Failed to spawn confirmation dialog")?;
+
+    Ok(())
 }
 
 /// Result from the GTK password dialog.
@@ -270,6 +316,21 @@ thread_local! {
 }
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Check for --confirm mode (spawned by ourselves after storing credential)
+    if args.len() >= 3 && args[1] == "--confirm" {
+        let cache_id = &args[2];
+        let prompt = args.get(3).map(|s| s.as_str()).unwrap_or("");
+        return run_confirmation_dialog(cache_id, prompt);
+    }
+
+    // Normal askpass mode
+    run_askpass_mode()
+}
+
+/// Run in normal askpass mode (SSH_ASKPASS/GIT_ASKPASS/SUDO_ASKPASS).
+fn run_askpass_mode() -> ExitCode {
     // Get the prompt
     let prompt = get_prompt();
 
@@ -308,8 +369,14 @@ fn main() -> ExitCode {
 
                     // Store in cache only if user wants to remember
                     if remember {
-                        if let Err(e) = store_credential(&cache_id, value, cache_type) {
+                        // Store as UNCONFIRMED - will be confirmed by the dialog
+                        if let Err(e) = store_credential(&cache_id, value, cache_type, false) {
                             eprintln!("Warning: Failed to cache credential: {}", e);
+                        } else {
+                            // Spawn confirmation dialog in a separate process
+                            if let Err(e) = spawn_confirmation_dialog(&cache_id, &prompt) {
+                                eprintln!("Warning: Failed to spawn confirmation dialog: {}", e);
+                            }
                         }
                     }
 
@@ -354,6 +421,247 @@ fn show_dialog_and_print(prompt: &str) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Result from the confirmation dialog.
+enum ConfirmResult {
+    /// User clicked "Remember" - confirm the credential.
+    Remember,
+    /// User clicked "Clear" or closed the dialog - clear the credential.
+    Clear,
+}
+
+/// Run in confirmation dialog mode (spawned after storing unconfirmed credential).
+fn run_confirmation_dialog(cache_id: &str, prompt: &str) -> ExitCode {
+    match show_confirmation_gtk_dialog(cache_id, prompt) {
+        Ok(ConfirmResult::Remember) => {
+            // User confirmed - promote the credential
+            match confirm_credential(cache_id) {
+                Ok(Response::Confirmed) => {
+                    // Successfully confirmed
+                    ExitCode::SUCCESS
+                }
+                Ok(Response::Error { code, message }) => {
+                    eprintln!("Failed to confirm credential ({}): {}", code, message);
+                    ExitCode::FAILURE
+                }
+                Ok(_) => {
+                    eprintln!("Unexpected response when confirming credential");
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    // Show error dialog
+                    show_error_dialog(&format!(
+                        "Failed to connect to daemon:\n{}\n\nThe credential was not saved.",
+                        e
+                    ));
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Ok(ConfirmResult::Clear) => {
+            // User declined or closed - clear the credential
+            match clear_credential(cache_id) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("Warning: Failed to clear credential: {}", e);
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error showing confirmation dialog: {}", e);
+            // Try to clear the unconfirmed credential on error
+            let _ = clear_credential(cache_id);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// Thread-local to pass confirmation result out of GTK event loop
+thread_local! {
+    static CONFIRM_RESULT: std::cell::RefCell<Option<ConfirmResult>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Show a GTK4 confirmation dialog asking if authentication succeeded.
+fn show_confirmation_gtk_dialog(cache_id: &str, prompt: &str) -> Result<ConfirmResult> {
+    // Initialize GTK
+    gtk4::init().context("Failed to initialize GTK4")?;
+
+    // Create the application with a different ID to allow running alongside main dialog
+    let app = Application::builder()
+        .application_id("io.github.rschaffar.askpass-cache.confirm")
+        .build();
+
+    let cache_id_owned = cache_id.to_string();
+    let prompt_owned = prompt.to_string();
+
+    app.connect_activate(move |app| {
+        // Create the main window
+        let window = ApplicationWindow::builder()
+            .application(app)
+            .title("Credential Cached")
+            .default_width(400)
+            .default_height(200)
+            .resizable(false)
+            .build();
+
+        // Window will be brought to front when presented
+
+        // Create a vertical box for layout
+        let vbox = GtkBox::new(Orientation::Vertical, 12);
+        vbox.set_margin_top(20);
+        vbox.set_margin_bottom(20);
+        vbox.set_margin_start(20);
+        vbox.set_margin_end(20);
+
+        // Add question label
+        let question_label = Label::new(Some("Did authentication succeed?"));
+        question_label.set_halign(Align::Start);
+        question_label.add_css_class("title-4");
+        vbox.append(&question_label);
+
+        // Show a shortened version of the cache_id
+        let display_id = if cache_id_owned.len() > 50 {
+            format!("{}...", &cache_id_owned[..47])
+        } else {
+            cache_id_owned.clone()
+        };
+        let id_label = Label::new(Some(&display_id));
+        id_label.set_halign(Align::Start);
+        id_label.set_wrap(true);
+        id_label.add_css_class("dim-label");
+        id_label.set_selectable(true);
+        vbox.append(&id_label);
+
+        // Show prompt if available
+        if !prompt_owned.is_empty() {
+            let prompt_display = if prompt_owned.len() > 80 {
+                format!("{}...", &prompt_owned[..77])
+            } else {
+                prompt_owned.clone()
+            };
+            let prompt_label = Label::new(Some(&prompt_display));
+            prompt_label.set_halign(Align::Start);
+            prompt_label.set_wrap(true);
+            prompt_label.add_css_class("caption");
+            vbox.append(&prompt_label);
+        }
+
+        // Create button box
+        let button_box = GtkBox::new(Orientation::Horizontal, 8);
+        button_box.set_halign(Align::End);
+        button_box.set_margin_top(16);
+
+        // Clear button (left)
+        let clear_button = Button::with_label("Clear");
+        let window_clone = window.clone();
+        clear_button.connect_clicked(move |_| {
+            CONFIRM_RESULT.with(|r| {
+                *r.borrow_mut() = Some(ConfirmResult::Clear);
+            });
+            window_clone.close();
+        });
+        button_box.append(&clear_button);
+
+        // Remember button (right, suggested action)
+        let remember_button = Button::with_label("Remember");
+        remember_button.add_css_class("suggested-action");
+        let window_clone = window.clone();
+        remember_button.connect_clicked(move |_| {
+            CONFIRM_RESULT.with(|r| {
+                *r.borrow_mut() = Some(ConfirmResult::Remember);
+            });
+            window_clone.close();
+        });
+        button_box.append(&remember_button);
+
+        // Handle window close (X button) - treat as Clear
+        window.connect_close_request(move |_| {
+            // If no result set yet, treat as Clear
+            CONFIRM_RESULT.with(|r| {
+                if r.borrow().is_none() {
+                    *r.borrow_mut() = Some(ConfirmResult::Clear);
+                }
+            });
+            glib::Propagation::Proceed
+        });
+
+        vbox.append(&button_box);
+        window.set_child(Some(&vbox));
+
+        // Focus the Remember button (most common action after success)
+        remember_button.grab_focus();
+
+        window.present();
+
+        // Set urgency hint to flash in taskbar
+        if let Some(surface) = window.surface() {
+            // Request attention
+            surface.queue_render();
+        }
+    });
+
+    // Run the application
+    app.run_with_args::<&str>(&[]);
+
+    // Get the result from thread-local storage
+    let result = CONFIRM_RESULT.with(|r| r.borrow_mut().take());
+    Ok(result.unwrap_or(ConfirmResult::Clear))
+}
+
+/// Show an error dialog.
+fn show_error_dialog(message: &str) {
+    if gtk4::init().is_err() {
+        eprintln!("Error: {}", message);
+        return;
+    }
+
+    let app = Application::builder()
+        .application_id("io.github.rschaffar.askpass-cache.error")
+        .build();
+
+    let message_owned = message.to_string();
+
+    app.connect_activate(move |app| {
+        let window = ApplicationWindow::builder()
+            .application(app)
+            .title("Error")
+            .default_width(400)
+            .default_height(150)
+            .resizable(false)
+            .build();
+
+        let vbox = GtkBox::new(Orientation::Vertical, 12);
+        vbox.set_margin_top(20);
+        vbox.set_margin_bottom(20);
+        vbox.set_margin_start(20);
+        vbox.set_margin_end(20);
+
+        let label = Label::new(Some(&message_owned));
+        label.set_wrap(true);
+        label.set_halign(Align::Start);
+        vbox.append(&label);
+
+        let button_box = GtkBox::new(Orientation::Horizontal, 8);
+        button_box.set_halign(Align::End);
+        button_box.set_margin_top(12);
+
+        let ok_button = Button::with_label("OK");
+        ok_button.add_css_class("suggested-action");
+        let window_clone = window.clone();
+        ok_button.connect_clicked(move |_| {
+            window_clone.close();
+        });
+        button_box.append(&ok_button);
+
+        vbox.append(&button_box);
+        window.set_child(Some(&vbox));
+        ok_button.grab_focus();
+        window.present();
+    });
+
+    app.run_with_args::<&str>(&[]);
 }
 
 #[cfg(test)]

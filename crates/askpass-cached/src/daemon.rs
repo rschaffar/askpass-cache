@@ -156,14 +156,18 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
                 value,
                 cache_type,
                 ttl,
+                confirmed,
             } => {
-                self.handle_store_credential(cache_id, value, cache_type, ttl, cache)
+                self.handle_store_credential(cache_id, value, cache_type, ttl, confirmed, cache)
                     .await
             }
             Request::ClearCache {
                 cache_id,
                 cache_type,
             } => self.handle_clear_cache(cache_id, cache_type, cache).await,
+            Request::ConfirmCredential { cache_id } => {
+                self.handle_confirm_credential(cache_id, cache).await
+            }
             Request::Ping => Response::Pong,
             Request::ListCache => self.handle_list_cache(cache).await,
         }
@@ -173,6 +177,13 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
     ///
     /// Returns the cached credential if available, or CacheMiss if not.
     /// The client is responsible for prompting the user and calling StoreCredential.
+    ///
+    /// # Unconfirmed Credential Cleanup
+    ///
+    /// If there's an unconfirmed credential for this cache ID, it is removed.
+    /// This handles the case where a previous authentication attempt failed
+    /// (wrong PIN) and SSH is retrying - we don't want to return the cached
+    /// wrong credential.
     async fn handle_get_credential(
         &self,
         prompt_text: String,
@@ -198,8 +209,15 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
             "Processing credential request"
         );
 
-        // Check cache
-        let cache_guard = cache.lock().await;
+        // First, clean up any unconfirmed credential for this key.
+        // If the user is being prompted again, it means the previous credential
+        // (if any) likely failed. This handles the "wrong PIN retry" case.
+        let mut cache_guard = cache.lock().await;
+        if cache_guard.remove_unconfirmed(&effective_cache_id) {
+            debug!(cache_id = %effective_cache_id, "Removed unconfirmed credential (likely failed auth)");
+        }
+
+        // Check cache for confirmed credentials
         if let Some(cached) = cache_guard.get(&effective_cache_id) {
             debug!(cache_id = %effective_cache_id, "Returning cached credential");
             return Response::credential(cached.secret().clone());
@@ -214,29 +232,65 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
     /// Handle a StoreCredential request.
     ///
     /// Stores a credential in the cache after the client has prompted the user.
+    ///
+    /// If `confirmed` is `false` (or `None` defaulting to `true`), the credential
+    /// will be stored in an unconfirmed state and won't be returned by `GetCredential`
+    /// until it is confirmed via `ConfirmCredential`.
     async fn handle_store_credential(
         &self,
         cache_id: String,
         value: SecretString,
         cache_type: Option<CacheType>,
         ttl: Option<u64>,
+        confirmed: Option<bool>,
         cache: Arc<Mutex<CredentialCache>>,
     ) -> Response {
         let effective_type = cache_type.unwrap_or_else(|| CacheType::from_cache_id(&cache_id));
         let effective_ttl = ttl
             .map(Duration::from_secs)
             .unwrap_or_else(|| effective_type.default_ttl());
+        let is_confirmed = confirmed.unwrap_or(true);
 
         let mut cache_guard = cache.lock().await;
-        cache_guard.insert(&cache_id, value, effective_ttl, effective_type);
+        cache_guard.insert(
+            &cache_id,
+            value,
+            effective_ttl,
+            effective_type,
+            is_confirmed,
+        );
 
         debug!(
             cache_id = %cache_id,
             ttl_secs = effective_ttl.as_secs(),
+            confirmed = is_confirmed,
             "Stored credential"
         );
 
         Response::stored()
+    }
+
+    /// Handle a ConfirmCredential request.
+    ///
+    /// Promotes an unconfirmed credential to confirmed state, making it
+    /// available via `GetCredential`.
+    async fn handle_confirm_credential(
+        &self,
+        cache_id: String,
+        cache: Arc<Mutex<CredentialCache>>,
+    ) -> Response {
+        let mut cache_guard = cache.lock().await;
+
+        if cache_guard.confirm(&cache_id) {
+            info!(cache_id = %cache_id, "Credential confirmed");
+            Response::confirmed()
+        } else {
+            debug!(cache_id = %cache_id, "Credential not found for confirmation");
+            Response::error(
+                ErrorCode::NotFound,
+                format!("No unconfirmed credential found for cache_id: {}", cache_id),
+            )
+        }
     }
 
     /// Handle a ClearCache request.
@@ -343,7 +397,7 @@ mod tests {
         let socket = ManualSocketProvider::new(&socket_path);
         let daemon = Daemon::new(socket);
 
-        // Pre-populate cache
+        // Pre-populate cache with confirmed credential
         {
             let mut cache = daemon.cache().lock().await;
             cache.insert(
@@ -351,6 +405,7 @@ mod tests {
                 SecretString::from("cached-password"),
                 Duration::from_secs(3600),
                 CacheType::Custom,
+                true, // confirmed
             );
         }
 
@@ -414,12 +469,13 @@ mod tests {
             value: SecretString::from("new-password"),
             cache_type: Some(CacheType::Ssh),
             ttl: Some(1800),
+            confirmed: Some(true),
         };
 
         let response = daemon.handle_request(request, cache).await;
         assert!(matches!(response, Response::Stored));
 
-        // Verify it was stored
+        // Verify it was stored and is accessible (confirmed)
         let cache = daemon.cache().lock().await;
         let cached = cache.get("new-key").expect("should be cached");
         assert_eq!(cached.secret().expose_secret(), "new-password");
@@ -441,12 +497,14 @@ mod tests {
                 SecretString::from("pass1"),
                 Duration::from_secs(3600),
                 CacheType::Ssh,
+                true,
             );
             cache.insert(
                 "key2",
                 SecretString::from("pass2"),
                 Duration::from_secs(3600),
                 CacheType::Git,
+                true,
             );
         }
 
@@ -486,18 +544,21 @@ mod tests {
                 SecretString::from("pass1"),
                 Duration::from_secs(3600),
                 CacheType::Ssh,
+                true,
             );
             cache.insert(
                 "ssh2",
                 SecretString::from("pass2"),
                 Duration::from_secs(3600),
                 CacheType::Ssh,
+                true,
             );
             cache.insert(
                 "git1",
                 SecretString::from("pass3"),
                 Duration::from_secs(3600),
                 CacheType::Git,
+                true,
             );
         }
 
@@ -587,12 +648,14 @@ mod tests {
                 SecretString::from("pin1"),
                 Duration::from_secs(1800),
                 CacheType::Ssh,
+                true,
             );
             cache.insert(
                 "git:https://github.com",
                 SecretString::from("token"),
                 Duration::from_secs(7200),
                 CacheType::Git,
+                true,
             );
         }
 
@@ -624,5 +687,145 @@ mod tests {
             }
             _ => panic!("Expected cache entries response"),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_store_unconfirmed_credential() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::new(socket);
+
+        // Store an unconfirmed credential
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::StoreCredential {
+            cache_id: "test-key".to_string(),
+            value: SecretString::from("secret"),
+            cache_type: Some(CacheType::Ssh),
+            ttl: None,
+            confirmed: Some(false), // Unconfirmed
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        assert!(matches!(response, Response::Stored));
+
+        // Verify it's NOT returned by GetCredential (unconfirmed)
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::GetCredential {
+            prompt: "test".to_string(),
+            cache_id: "test-key".to_string(),
+            cache_type: None,
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        // Should be cache miss because credential is unconfirmed
+        // Note: GetCredential also removes unconfirmed credentials
+        assert!(matches!(response, Response::CacheMiss { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_confirm_credential_success() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::new(socket);
+
+        // Store an unconfirmed credential directly in cache
+        {
+            let mut cache = daemon.cache().lock().await;
+            cache.insert(
+                "test-key",
+                SecretString::from("secret"),
+                Duration::from_secs(3600),
+                CacheType::Ssh,
+                false, // Unconfirmed
+            );
+        }
+
+        // Confirm it
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::ConfirmCredential {
+            cache_id: "test-key".to_string(),
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        assert!(matches!(response, Response::Confirmed));
+
+        // Now it should be accessible via GetCredential
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::GetCredential {
+            prompt: "test".to_string(),
+            cache_id: "test-key".to_string(),
+            cache_type: None,
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        match response {
+            Response::Credential { value } => {
+                assert_eq!(value.expose_secret(), "secret");
+            }
+            _ => panic!("Expected credential response after confirmation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_confirm_credential_not_found() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::new(socket);
+
+        // Try to confirm non-existent credential
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::ConfirmCredential {
+            cache_id: "nonexistent".to_string(),
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        match response {
+            Response::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::NotFound);
+            }
+            _ => panic!("Expected error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_credential_removes_unconfirmed() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::new(socket);
+
+        // Store an unconfirmed credential directly in cache
+        {
+            let mut cache = daemon.cache().lock().await;
+            cache.insert(
+                "test-key",
+                SecretString::from("wrong-password"),
+                Duration::from_secs(3600),
+                CacheType::Ssh,
+                false, // Unconfirmed
+            );
+        }
+
+        // GetCredential should remove the unconfirmed credential and return cache miss
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::GetCredential {
+            prompt: "test".to_string(),
+            cache_id: "test-key".to_string(),
+            cache_type: None,
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        assert!(matches!(response, Response::CacheMiss { .. }));
+
+        // Verify the unconfirmed credential was removed
+        let cache = daemon.cache().lock().await;
+        assert!(cache.get_any("test-key").is_none());
     }
 }
