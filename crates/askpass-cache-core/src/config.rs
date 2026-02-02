@@ -34,7 +34,7 @@
 //! default_remember = true
 //!
 //! [security]
-//! encrypt_cache = true        # Phase 5
+//! encrypt_cache = true        # Encrypt credentials in memory (default)
 //! confirm_cached = false
 //! ```
 
@@ -149,7 +149,12 @@ impl Default for PromptConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
-    /// Whether to encrypt the cache (Phase 5, not yet implemented).
+    /// Whether to encrypt cached credentials with AES-256-GCM.
+    ///
+    /// When enabled, credentials are encrypted before being stored in the cache
+    /// using a session key that is generated at daemon startup and held in
+    /// memory-locked storage. This protects against secrets being exposed
+    /// if the cache memory is swapped to disk.
     pub encrypt_cache: bool,
     /// Whether to require confirmation before using cached credentials.
     pub confirm_cached: bool,

@@ -11,6 +11,7 @@
 //! - [`traits`]: Pluggable component traits (`SocketProvider`, `EventMonitor`)
 //! - [`cache`]: Secure credential cache with memory locking and TTL expiry
 //! - [`cache_id`]: Auto-detection of cache IDs from prompt text
+//! - [`crypto`]: AES-256-GCM encryption for cached credentials
 //!
 //! # Example
 //!
@@ -33,6 +34,7 @@
 pub mod cache;
 pub mod cache_id;
 pub mod config;
+pub mod crypto;
 pub mod protocol;
 pub mod traits;
 pub mod types;
@@ -41,6 +43,7 @@ pub mod types;
 pub use cache::{CachedCredential, CredentialCache};
 pub use cache_id::{detect_cache_id, Confidence, DetectionResult};
 pub use config::{CacheConfig, CacheTypeConfig, Config, ConfigError, PromptConfig, SecurityConfig};
+pub use crypto::{EncryptedSecret, EncryptionKey};
 pub use protocol::{short_id, CacheEntryInfo, ErrorCode, ProtocolError, Request, Response};
 pub use traits::{
     EventError, EventMonitor, NoOpEventMonitor, SocketError, SocketProvider, SystemEvent,
