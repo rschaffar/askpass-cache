@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use askpass_cache_core::{CacheType, Request, Response};
+use askpass_cache_core::{CacheType, Config, Request, Response};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
@@ -177,7 +177,12 @@ enum DialogResult {
 ///
 /// This function initializes GTK4, shows a dialog, and returns when the user
 /// either enters a password or cancels.
-fn show_gtk_dialog(prompt_text: &str) -> Result<DialogResult> {
+///
+/// # Arguments
+///
+/// * `prompt_text` - The prompt to display to the user
+/// * `default_remember` - Default state of the "Remember" checkbox
+fn show_gtk_dialog(prompt_text: &str, default_remember: bool) -> Result<DialogResult> {
     // Initialize GTK
     gtk4::init().context("Failed to initialize GTK4")?;
 
@@ -221,7 +226,7 @@ fn show_gtk_dialog(prompt_text: &str) -> Result<DialogResult> {
 
         // Add "Remember for this session" checkbox with Alt+R mnemonic
         let remember_check = CheckButton::with_mnemonic("_Remember for this session");
-        remember_check.set_active(true); // Checked by default
+        remember_check.set_active(default_remember);
         vbox.append(&remember_check);
 
         // Create button box
@@ -295,11 +300,20 @@ thread_local! {
 }
 
 fn main() -> ExitCode {
-    run_askpass_mode()
+    // Load config (warn on error, use defaults - client is more lenient than daemon)
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: Failed to load config, using defaults: {}", e);
+            Config::default()
+        }
+    };
+
+    run_askpass_mode(&config)
 }
 
 /// Run in normal askpass mode (SSH_ASKPASS/GIT_ASKPASS/SUDO_ASKPASS).
-fn run_askpass_mode() -> ExitCode {
+fn run_askpass_mode(config: &Config) -> ExitCode {
     // Get the prompt
     let prompt = get_prompt();
 
@@ -309,7 +323,7 @@ fn run_askpass_mode() -> ExitCode {
         Err(e) => {
             eprintln!("Error connecting to daemon: {}", e);
             // Fall back to showing dialog without caching
-            return show_dialog_and_print(&prompt);
+            return show_dialog_and_print(&prompt, config);
         }
     };
 
@@ -329,14 +343,14 @@ fn run_askpass_mode() -> ExitCode {
             value,
         } => {
             // Unconfirmed credential exists - show confirmation dialog
-            handle_unconfirmed_credential(&prompt, &cache_id, cache_type, value)
+            handle_unconfirmed_credential(&prompt, &cache_id, cache_type, value, config)
         }
         Response::CacheMiss {
             cache_id,
             cache_type,
         } => {
             // Cache miss - show dialog, store result, and print
-            handle_cache_miss(&prompt, &cache_id, cache_type)
+            handle_cache_miss(&prompt, &cache_id, cache_type, config)
         }
         Response::Error { code, message } => {
             eprintln!("Error ({}): {}", code, message);
@@ -355,6 +369,7 @@ fn handle_unconfirmed_credential(
     cache_id: &str,
     cache_type: CacheType,
     cached_value: SecretString,
+    config: &Config,
 ) -> ExitCode {
     match show_unconfirmed_dialog(prompt) {
         Ok(UnconfirmedDialogResult::UseAndRemember) => {
@@ -371,7 +386,7 @@ fn handle_unconfirmed_credential(
         Ok(UnconfirmedDialogResult::EnterNewPin) => {
             // User wants to enter a new PIN - clear the old one and show dialog
             let _ = clear_credential(cache_id);
-            handle_cache_miss(prompt, cache_id, cache_type)
+            handle_cache_miss(prompt, cache_id, cache_type, config)
         }
         Ok(UnconfirmedDialogResult::Cancelled) => {
             // User cancelled - return failure (don't use the cached credential)
@@ -385,8 +400,13 @@ fn handle_unconfirmed_credential(
 }
 
 /// Handle a cache miss - show PIN dialog, store result, and print.
-fn handle_cache_miss(prompt: &str, cache_id: &str, cache_type: CacheType) -> ExitCode {
-    match show_gtk_dialog(prompt) {
+fn handle_cache_miss(
+    prompt: &str,
+    cache_id: &str,
+    cache_type: CacheType,
+    config: &Config,
+) -> ExitCode {
+    match show_gtk_dialog(prompt, config.prompt.default_remember) {
         Ok(DialogResult::Password { value, remember }) => {
             // Print the password first (so caller gets it quickly)
             print!("{}", value.expose_secret());
@@ -417,8 +437,8 @@ fn handle_cache_miss(prompt: &str, cache_id: &str, cache_type: CacheType) -> Exi
 
 /// Show dialog and print result without caching.
 /// Used as fallback when daemon is not available.
-fn show_dialog_and_print(prompt: &str) -> ExitCode {
-    match show_gtk_dialog(prompt) {
+fn show_dialog_and_print(prompt: &str, config: &Config) -> ExitCode {
+    match show_gtk_dialog(prompt, config.prompt.default_remember) {
         Ok(DialogResult::Password { value, .. }) => {
             // Note: remember flag is ignored here since daemon is unavailable
             print!("{}", value.expose_secret());

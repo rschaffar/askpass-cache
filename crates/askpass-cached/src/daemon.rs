@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use askpass_cache_core::{
-    cache_id::detect_cache_id, CacheEntryInfo, CacheType, CredentialCache, ErrorCode, EventMonitor,
-    NoOpEventMonitor, Request, Response, SocketProvider,
+    cache_id::detect_cache_id, CacheEntryInfo, CacheType, Config, CredentialCache, ErrorCode,
+    EventMonitor, NoOpEventMonitor, Request, Response, SocketProvider,
 };
 use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -34,15 +34,23 @@ pub struct Daemon<S: SocketProvider, E: EventMonitor> {
     /// The event monitor (used in Phase 3 for D-Bus event monitoring).
     #[allow(dead_code)]
     event_monitor: Mutex<E>,
+    /// Configuration.
+    config: Arc<Config>,
 }
 
 impl<S: SocketProvider> Daemon<S, NoOpEventMonitor> {
-    /// Create a new daemon without event monitoring.
+    /// Create a new daemon without event monitoring, using default configuration.
     pub fn new(socket_provider: S) -> Self {
+        Self::with_config(socket_provider, Config::default())
+    }
+
+    /// Create a new daemon with the given configuration.
+    pub fn with_config(socket_provider: S, config: Config) -> Self {
         Self {
             cache: Arc::new(Mutex::new(CredentialCache::new())),
             socket_provider,
             event_monitor: Mutex::new(NoOpEventMonitor),
+            config: Arc::new(config),
         }
     }
 }
@@ -50,10 +58,20 @@ impl<S: SocketProvider> Daemon<S, NoOpEventMonitor> {
 impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
     /// Create a new daemon with event monitoring.
     pub fn with_event_monitor(socket_provider: S, event_monitor: E) -> Self {
+        Self::with_event_monitor_and_config(socket_provider, event_monitor, Config::default())
+    }
+
+    /// Create a new daemon with event monitoring and custom configuration.
+    pub fn with_event_monitor_and_config(
+        socket_provider: S,
+        event_monitor: E,
+        config: Config,
+    ) -> Self {
         Self {
             cache: Arc::new(Mutex::new(CredentialCache::new())),
             socket_provider,
             event_monitor: Mutex::new(event_monitor),
+            config: Arc::new(config),
         }
     }
 
@@ -243,6 +261,11 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
     /// If `confirmed` is `false` (or `None` defaulting to `true`), the credential
     /// will be stored in an unconfirmed state and won't be returned by `GetCredential`
     /// until it is confirmed via `ConfirmCredential`.
+    ///
+    /// TTL is determined by:
+    /// 1. Explicit TTL in request (clamped to max_ttl)
+    /// 2. Type-specific default_ttl from config
+    /// 3. Built-in type defaults
     async fn handle_store_credential(
         &self,
         cache_id: String,
@@ -253,9 +276,27 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
         cache: Arc<Mutex<CredentialCache>>,
     ) -> Response {
         let effective_type = cache_type.unwrap_or_else(|| CacheType::from_cache_id(&cache_id));
-        let effective_ttl = ttl
-            .map(Duration::from_secs)
-            .unwrap_or_else(|| effective_type.default_ttl());
+
+        // Get config-based TTL values
+        let default_ttl = self.config.ttl_for(effective_type);
+        let max_ttl = self.config.max_ttl_for(effective_type);
+
+        // Use requested TTL or fall back to default
+        let requested_ttl = ttl.map(Duration::from_secs).unwrap_or(default_ttl);
+
+        // Clamp to max_ttl if exceeded
+        let effective_ttl = if requested_ttl > max_ttl {
+            info!(
+                cache_type = %effective_type,
+                requested_secs = requested_ttl.as_secs(),
+                max_secs = max_ttl.as_secs(),
+                "TTL clamped to maximum"
+            );
+            max_ttl
+        } else {
+            requested_ttl
+        };
+
         let is_confirmed = confirmed.unwrap_or(true);
 
         let mut cache_guard = cache.lock().await;
@@ -363,6 +404,11 @@ impl<S: SocketProvider, E: EventMonitor> Daemon<S, E> {
     #[cfg(test)]
     pub fn cache(&self) -> &Arc<Mutex<CredentialCache>> {
         &self.cache
+    }
+
+    /// Get a reference to the configuration.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 }
 
@@ -852,5 +898,110 @@ mod tests {
         // Verify the unconfirmed credential is still there (not removed)
         let cache = daemon.cache().lock().await;
         assert!(cache.get_any("test-key").is_some());
+    }
+
+    #[tokio::test]
+    async fn daemon_uses_config_for_default_ttl() {
+        use askpass_cache_core::config::{CacheConfig, CacheTypeConfig};
+
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        // Create config with custom SSH TTL
+        let config = Config {
+            cache: CacheConfig {
+                ssh: Some(CacheTypeConfig {
+                    default_ttl: Some(999),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::with_config(socket, config);
+
+        // Store without explicit TTL - should use config default
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::StoreCredential {
+            cache_id: "ssh-test".to_string(),
+            value: SecretString::from("secret"),
+            cache_type: Some(CacheType::Ssh),
+            ttl: None, // Use default from config
+            confirmed: Some(true),
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        assert!(matches!(response, Response::Stored));
+
+        // Check that TTL is approximately 999 seconds (give or take a second)
+        let cache = daemon.cache().lock().await;
+        let cached = cache.get("ssh-test").expect("should be cached");
+        let remaining = cached.time_remaining().expect("should have time remaining");
+        assert!(remaining.as_secs() >= 998 && remaining.as_secs() <= 999);
+    }
+
+    #[tokio::test]
+    async fn daemon_clamps_ttl_to_max() {
+        use askpass_cache_core::config::{CacheConfig, CacheTypeConfig};
+
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        // Create config with low max TTL for sudo
+        let config = Config {
+            cache: CacheConfig {
+                sudo: Some(CacheTypeConfig {
+                    max_ttl: Some(60), // 1 minute max
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::with_config(socket, config);
+
+        // Try to store with TTL exceeding max
+        let cache = Arc::clone(daemon.cache());
+        let request = Request::StoreCredential {
+            cache_id: "sudo-test".to_string(),
+            value: SecretString::from("secret"),
+            cache_type: Some(CacheType::Sudo),
+            ttl: Some(3600), // Request 1 hour, but max is 1 minute
+            confirmed: Some(true),
+        };
+
+        let response = daemon.handle_request(request, cache).await;
+        assert!(matches!(response, Response::Stored));
+
+        // Check that TTL was clamped to 60 seconds
+        let cache = daemon.cache().lock().await;
+        let cached = cache.get("sudo-test").expect("should be cached");
+        let remaining = cached.time_remaining().expect("should have time remaining");
+        assert!(remaining.as_secs() <= 60);
+    }
+
+    #[tokio::test]
+    async fn daemon_config_accessor() {
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        let config = Config {
+            prompt: askpass_cache_core::config::PromptConfig {
+                timeout: 42,
+                default_remember: false,
+            },
+            ..Default::default()
+        };
+
+        let socket = ManualSocketProvider::new(&socket_path);
+        let daemon = Daemon::with_config(socket, config);
+
+        // Verify we can access config
+        assert_eq!(daemon.config().prompt.timeout, 42);
+        assert!(!daemon.config().prompt.default_remember);
     }
 }

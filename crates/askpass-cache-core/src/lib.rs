@@ -32,6 +32,7 @@
 
 pub mod cache;
 pub mod cache_id;
+pub mod config;
 pub mod protocol;
 pub mod traits;
 pub mod types;
@@ -39,6 +40,7 @@ pub mod types;
 // Re-export commonly used types at the crate root for convenience
 pub use cache::{CachedCredential, CredentialCache};
 pub use cache_id::{detect_cache_id, Confidence, DetectionResult};
+pub use config::{CacheConfig, CacheTypeConfig, Config, ConfigError, PromptConfig, SecurityConfig};
 pub use protocol::{short_id, CacheEntryInfo, ErrorCode, ProtocolError, Request, Response};
 pub use traits::{
     EventError, EventMonitor, NoOpEventMonitor, SocketError, SocketProvider, SystemEvent,

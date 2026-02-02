@@ -13,10 +13,10 @@
 //! The askpass-client binary handles all UI prompts (GTK4 dialogs) and
 //! inherits the display environment from the calling process (SSH, Git, etc).
 
-use anyhow::Result;
-use askpass_cache_core::SocketProvider;
+use anyhow::{Context, Result};
+use askpass_cache_core::{Config, SocketProvider};
 use askpass_cached::{Daemon, SystemdSocketProvider};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn setup_logging() {
@@ -52,6 +52,18 @@ async fn main() -> Result<()> {
         "Starting askpass-cached"
     );
 
+    // Load configuration (fail if config file exists but is invalid)
+    let config = Config::load().context("Failed to load configuration")?;
+
+    // Log config status
+    if let Some(path) = Config::default_path() {
+        if path.exists() {
+            info!(path = %path.display(), "Loaded configuration");
+        } else {
+            debug!("No config file found, using defaults");
+        }
+    }
+
     let socket_provider = SystemdSocketProvider::new();
 
     // Log socket path
@@ -59,8 +71,8 @@ async fn main() -> Result<()> {
         info!(path = %path.display(), "Socket path");
     }
 
-    // Create and run daemon
-    let daemon = Daemon::new(socket_provider);
+    // Create and run daemon with config
+    let daemon = Daemon::with_config(socket_provider, config);
 
     info!("Daemon starting...");
     if let Err(e) = daemon.run().await {
