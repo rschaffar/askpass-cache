@@ -172,6 +172,24 @@ pub enum Response {
         cache_type: CacheType,
     },
 
+    /// An unconfirmed credential exists for this key.
+    /// Client should show a confirmation dialog asking if the previous credential worked.
+    /// User can either confirm (use & remember) or enter a new credential.
+    UnconfirmedCredential {
+        /// The resolved cache ID.
+        cache_id: String,
+
+        /// The detected cache type.
+        cache_type: CacheType,
+
+        /// The previously entered credential value.
+        #[serde(
+            serialize_with = "serialize_secret",
+            deserialize_with = "deserialize_secret"
+        )]
+        value: SecretString,
+    },
+
     /// Confirmation that a credential was stored.
     Stored,
 
@@ -283,6 +301,20 @@ impl Response {
         Response::CacheMiss {
             cache_id: cache_id.into(),
             cache_type,
+        }
+    }
+
+    /// Create an unconfirmed credential response.
+    /// Used when a credential was previously entered but not yet confirmed.
+    pub fn unconfirmed_credential(
+        cache_id: impl Into<String>,
+        cache_type: CacheType,
+        value: SecretString,
+    ) -> Self {
+        Response::UnconfirmedCredential {
+            cache_id: cache_id.into(),
+            cache_type,
+            value,
         }
     }
 
@@ -457,6 +489,33 @@ mod tests {
             } => {
                 assert_eq!(cache_id, "ssh-fido:SHA256:abc");
                 assert_eq!(cache_type, CacheType::Ssh);
+            }
+            _ => panic!("Wrong response type"),
+        }
+    }
+
+    #[test]
+    fn response_unconfirmed_credential_serde_roundtrip() {
+        let response = Response::unconfirmed_credential(
+            "ssh-fido:SHA256:abc",
+            CacheType::Ssh,
+            SecretString::from("test-pin"),
+        );
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("unconfirmed_credential"));
+
+        let parsed: Response = serde_json::from_str(&json).unwrap();
+
+        match parsed {
+            Response::UnconfirmedCredential {
+                cache_id,
+                cache_type,
+                value,
+            } => {
+                assert_eq!(cache_id, "ssh-fido:SHA256:abc");
+                assert_eq!(cache_type, CacheType::Ssh);
+                assert_eq!(value.expose_secret(), "test-pin");
             }
             _ => panic!("Wrong response type"),
         }
