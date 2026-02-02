@@ -200,6 +200,7 @@ pub struct CachedCredential {
     created_at: Instant,
     ttl: Duration,
     cache_type: CacheType,
+    confirmed: bool,             // Whether credential has been confirmed by user
 }
 
 // Lock the credential cache memory region
@@ -228,12 +229,16 @@ Binary that serves as SSH_ASKPASS, GIT_ASKPASS, SUDO_ASKPASS. **Handles all user
 1. Get prompt text from command-line argument (passed by SSH/Git/sudo)
 2. Connect to daemon socket
 3. Send `GetCredential` request with prompt text and `cache_id: "auto"`
-4. If `Credential` response: Print to stdout, exit (cache hit)
-5. If `CacheMiss` response:
-   - Show GTK4 password dialog with "Remember for this session" checkbox
-   - If user enters password and "Remember" is checked: Send `StoreCredential` to daemon
-   - Print credential to stdout
-6. Zero all memory, exit
+4. Handle response:
+   - **`Credential`**: Print to stdout, exit (confirmed cache hit)
+   - **`UnconfirmedCredential`**: Show confirmation dialog (see [Credential Confirmation Flow](#credential-confirmation-flow))
+     - If user confirms: Send `ConfirmCredential`, print to stdout, exit
+     - If user wants new PIN: Send `ClearCache`, continue as cache miss
+     - If user cancels: Exit with error
+   - **`CacheMiss`**: Show GTK4 password dialog with "Remember" checkbox
+     - If "Remember" is checked: Send `StoreCredential` with `confirmed: false`
+     - Print credential to stdout
+5. Zero all memory, exit
 
 **Fallback Mode:** If daemon is unavailable, client shows dialog and prints credential without caching.
 
@@ -479,7 +484,8 @@ Fields:
   "cache_id": "ssh-fido:SHA256:abc123",
   "value": "123456",
   "cache_type": "ssh",
-  "ttl": 1800
+  "ttl": 1800,
+  "confirmed": false
 }
 ```
 
@@ -489,6 +495,7 @@ Fields:
 - `value`: The credential to store
 - `cache_type`: Optional type (from `CacheMiss` response)
 - `ttl`: Optional TTL override in seconds
+- `confirmed`: Optional boolean (default: `false`). If `false`, credential is stored as unconfirmed and won't be returned by `GetCredential` until confirmed. See [Credential Confirmation Flow](#credential-confirmation-flow).
 
 **ClearCache (client -> daemon):**
 ```json
@@ -502,6 +509,20 @@ Fields:
 Fields:
 - `cache_id`: `"all"` to clear all, or specific cache ID
 - `cache_type`: Optional, clear only entries of this type
+
+**ConfirmCredential (client -> daemon):**
+```json
+{
+  "type": "confirm_credential",
+  "cache_id": "ssh-fido:SHA256:abc123"
+}
+```
+
+Fields:
+- `type`: Always `"confirm_credential"`
+- `cache_id`: The cache key of the unconfirmed credential to confirm
+
+Used to mark an unconfirmed credential as confirmed after successful authentication. See [Credential Confirmation Flow](#credential-confirmation-flow).
 
 **Ping (health check):**
 ```json
@@ -532,7 +553,32 @@ The client should:
 2. If user enters password and wants to remember: Send `StoreCredential` with the returned `cache_id` and `cache_type`
 3. Print credential to stdout
 
-**Stored (confirmation):**
+**UnconfirmedCredential (unconfirmed cache hit):**
+```json
+{
+  "type": "unconfirmed_credential",
+  "cache_id": "ssh-fido:SHA256:abc123",
+  "cache_type": "ssh",
+  "value": "123456"
+}
+```
+
+Returned when a `GetCredential` request finds an unconfirmed credential. The client should:
+1. Show a confirmation dialog asking "Did the credential work?"
+2. If user confirms: Send `ConfirmCredential` request, then print the value to stdout
+3. If user wants to re-enter: Send `ClearCache` for this `cache_id`, show password dialog
+4. If user cancels: Exit without printing
+
+See [Credential Confirmation Flow](#credential-confirmation-flow).
+
+**Confirmed (confirmation acknowledgement):**
+```json
+{"type": "confirmed"}
+```
+
+Returned after a successful `ConfirmCredential` request. The credential is now marked as confirmed and will be returned by future `GetCredential` requests.
+
+**Stored (store confirmation):**
 ```json
 {"type": "stored"}
 ```
@@ -554,7 +600,7 @@ The client should:
 }
 ```
 
-Error codes: `cancelled`, `invalid_request`, `internal_error`, `shutting_down`
+Error codes: `cancelled`, `invalid_request`, `internal_error`, `shutting_down`, `not_found`
 
 **Pong:**
 ```json
@@ -856,6 +902,94 @@ ui-cli = ["dep:rpassword"]  # CLI fallback
 
 - **git-credential-cache**: Simple daemon pattern
   - Reference for Unix socket + timeout architecture
+
+### Credential Confirmation Flow
+
+A two-stage confirmation mechanism prevents wrong credentials (like incorrect FIDO2 PINs) from being cached, which could cause repeated failed authentication attempts and potentially lock users out of hardware keys.
+
+#### The Problem
+
+Without confirmation, a wrong PIN would be cached and reused:
+1. User enters wrong PIN, checks "Remember"
+2. PIN is cached immediately
+3. SSH authentication fails (wrong PIN)
+4. Next SSH operation retrieves the wrong PIN from cache
+5. Authentication fails again (Yubikey PIN counter decrements)
+6. Repeat until locked out
+
+#### The Solution: Two-Stage Confirmation
+
+**Stage 1: Initial Entry (cache miss)**
+```
+Client                          Daemon
+  │                                │
+  ├─── GetCredential ─────────────►│
+  │◄── CacheMiss ─────────────────┤
+  │                                │
+  │  [User enters PIN, checks      │
+  │   "Remember for this session"] │
+  │                                │
+  ├─── StoreCredential ───────────►│  (confirmed: false)
+  │    (confirmed: false)          │
+  │◄── Stored ────────────────────┤
+  │                                │
+  │  [Print PIN to stdout]         │
+  │  [SSH tries to authenticate]   │
+```
+
+**Stage 2: Confirmation (unconfirmed exists)**
+```
+Client                          Daemon
+  │                                │
+  ├─── GetCredential ─────────────►│
+  │◄── UnconfirmedCredential ─────┤  (returns cached value)
+  │                                │
+  │  [Show confirmation dialog:    │
+  │   "Did it work?"]              │
+  │                                │
+  │  If "Use & Remember":          │
+  ├─── ConfirmCredential ─────────►│
+  │◄── Confirmed ─────────────────┤
+  │  [Print PIN to stdout]         │
+  │                                │
+  │  If "Enter New PIN":           │
+  ├─── ClearCache (cache_id) ─────►│
+  │◄── CacheCleared ──────────────┤
+  │  [Show password dialog]        │
+  │  [Continue as Stage 1]         │
+```
+
+**Stage 3: Normal Operation (confirmed exists)**
+```
+Client                          Daemon
+  │                                │
+  ├─── GetCredential ─────────────►│
+  │◄── Credential ────────────────┤  (confirmed credential)
+  │                                │
+  │  [Print PIN to stdout]         │
+```
+
+#### Client Confirmation Dialog
+
+When an `UnconfirmedCredential` response is received, the client shows:
+
+```
+┌─────────────────────────────────────────────┐
+│  Confirm Cached Credential                   │
+├─────────────────────────────────────────────┤
+│                                             │
+│  A cached credential was found for:         │
+│  SHA256:xK3N...                             │
+│                                             │
+│  Did the previous authentication succeed?   │
+│                                             │
+│  [ Enter New PIN ]   [ Cancel ]   [ Use ]   │
+└─────────────────────────────────────────────┘
+```
+
+- **Use & Remember**: Confirms the credential for future use
+- **Enter New PIN**: Clears the unconfirmed credential, shows password dialog
+- **Cancel**: Exits without authentication
 
 ### Design Decisions
 
