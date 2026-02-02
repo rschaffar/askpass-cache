@@ -861,8 +861,8 @@ ui-cli = ["dep:rpassword"]  # CLI fallback
 - [x] Development shell (`nix develop`)
 
 #### Phase 3: Configuration & Polish (IN PROGRESS)
-- [ ] Configuration file parsing in daemon
-- [ ] CLI arguments for daemon (`--config`, `--socket`, `--verbose`)
+- [x] Configuration file parsing in daemon
+- [x] CLI arguments for daemon (`--config`, `--socket`, `--verbose`)
 - [x] `askpass-cache-ctl` utility (list, delete, ping commands)
 - [ ] Timeout with visual countdown in dialog
 - [ ] Password visibility toggle in dialog
